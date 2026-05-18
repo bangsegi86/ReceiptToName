@@ -116,11 +116,25 @@ def main():
         "Pillow",
         "pytesseract",
         "tkinterdnd2",
-        "paddlepaddle",
-        "paddleocr",
         "pyinstaller",
         "--upgrade", "--quiet",
     ])
+
+    # PaddleOCR: Python 3.8–3.12 만 지원 → 실패해도 빌드 계속
+    has_paddle = False
+    print("\n  [선택] PaddleOCR 설치 시도 (Python 3.12 이하에서만 지원)...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install",
+             "paddlepaddle", "paddleocr", "--upgrade", "--quiet"],
+            check=True,
+        )
+        has_paddle = True
+        print("  PaddleOCR 설치 완료 — 최고 품질 OCR 사용 가능")
+    except subprocess.CalledProcessError:
+        print("  PaddleOCR 설치 실패 (Python 버전 미지원 등)")
+        print("  → Tesseract + Windows 내장 OCR 로 동작합니다.")
+        print("  → Python 3.11 또는 3.12 사용 시 PaddleOCR 활성화 가능")
 
     # 2. Tesseract 확인
     print("\n[2/4] Tesseract 위치 탐색...")
@@ -166,10 +180,13 @@ def main():
         "--hidden-import", "tkinter.messagebox",
         "--collect-all", "tkinterdnd2",
         "--collect-all", "cv2",
-        "--collect-all", "paddleocr",
-        "--collect-all", "paddle",
-        "--hidden-import", "paddleocr",
     ]
+    if has_paddle:
+        cmd += [
+            "--collect-all", "paddleocr",
+            "--collect-all", "paddle",
+            "--hidden-import", "paddleocr",
+        ]
     for b in add_binary:
         cmd += ["--add-binary", b]
     for d in add_data:
