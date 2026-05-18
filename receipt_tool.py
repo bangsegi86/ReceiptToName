@@ -176,6 +176,10 @@ class ReceiptApp:
         btn(bf, "✏️  수동 조정",  self._toggle_manual).pack(side=tk.LEFT, padx=2)
         btn(bf, "💾  보정본으로 원본 대체", self._replace_with_warped,
             C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        btn(bf, "📋  현재 이미지 복사", self._copy_image_to_clipboard,
+            C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        btn(bf, "🗜  현재 이미지 압축 저장", self._compress_current,
+            C['surface']).pack(side=tk.LEFT, padx=2)
 
         tk.Frame(bf, bg=C['panel'], width=12).pack(side=tk.LEFT)
         self.prev_btn = btn(bf, "◀ 이전", self._prev_file)
@@ -912,6 +916,84 @@ class ReceiptApp:
         self._refresh_canvas()
         self._apply_correction()
         messagebox.showinfo("완료", "원본 파일을 보정된 이미지로 대체했습니다.")
+
+    # ── 현재 이미지 클립보드 복사
+    # ──────────────────────────────────────────
+    def _copy_image_to_clipboard(self):
+        img = self.warped_img if self.warped_img is not None else self.orig_img
+        if img is None:
+            messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
+            return
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                tmp_path = f.name
+            ok, buf = cv2.imencode('.png', img)
+            if not ok:
+                raise RuntimeError("인코딩 실패")
+            buf.tofile(tmp_path)
+
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "Add-Type -AssemblyName System.Drawing;"
+                f"$img = [System.Drawing.Image]::FromFile('{tmp_path}');"
+                "[System.Windows.Forms.Clipboard]::SetImage($img);"
+                "$img.Dispose();"
+            )
+            subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps_script],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=15,
+            )
+            messagebox.showinfo("복사 완료", "현재 이미지를 클립보드에 복사했습니다.")
+        except Exception as e:
+            messagebox.showerror("오류", f"클립보드 복사 실패\n{e}")
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    # ── 현재 이미지 압축 저장
+    # ──────────────────────────────────────────
+    def _compress_current(self):
+        img = self.warped_img if self.warped_img is not None else self.orig_img
+        if img is None:
+            messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
+            return
+        if not self.orig_path:
+            messagebox.showwarning("경고", "원본 파일 경로를 알 수 없습니다.")
+            return
+
+        path = Path(self.orig_path)
+        ext  = path.suffix.lower()
+        if ext == '.png':
+            encode_ext = '.png'
+            params     = [cv2.IMWRITE_PNG_COMPRESSION, 9]
+        else:
+            encode_ext = '.jpg'
+            params     = [cv2.IMWRITE_JPEG_QUALITY, 85]
+
+        stem     = path.stem
+        out_stem = stem if stem.startswith('resize_') else f'resize_{stem}'
+        out_path = path.parent / f'{out_stem}{encode_ext}'
+
+        try:
+            ok, buf = cv2.imencode(encode_ext, img, params)
+            if not ok:
+                raise RuntimeError("인코딩 실패")
+            buf.tofile(str(out_path))
+            new_size  = len(buf)
+            orig_size = path.stat().st_size if path.exists() else 0
+
+            def _fmt(b):
+                return f"{b/1024/1024:.1f}MB" if b >= 1024*1024 else f"{b/1024:.0f}KB"
+
+            msg = f"저장 완료: {out_path.name}"
+            if orig_size:
+                msg += f"\n{_fmt(orig_size)} → {_fmt(new_size)}"
+            messagebox.showinfo("압축 저장 완료", msg)
+        except Exception as e:
+            messagebox.showerror("저장 오류", f"압축 저장 실패\n{e}")
 
     # ── 자동 원근 보정
     # ──────────────────────────────────────────
