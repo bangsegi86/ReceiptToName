@@ -172,6 +172,8 @@ class ReceiptApp:
         btn(bf, "📂  파일 열기",  self._open_file,   C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
         btn(bf, "✨  자동 보정",  self._auto_correct).pack(side=tk.LEFT, padx=2)
         btn(bf, "✏️  수동 조정",  self._toggle_manual).pack(side=tk.LEFT, padx=2)
+        btn(bf, "💾  보정본으로 원본 대체", self._replace_with_warped,
+            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
 
         tk.Frame(bf, bg=C['panel'], width=12).pack(side=tk.LEFT)
         self.prev_btn = btn(bf, "◀ 이전", self._prev_file)
@@ -598,7 +600,53 @@ class ReceiptApp:
         return (cx - ox) / self.display_scale, (cy - oy) / self.display_scale
 
     # ──────────────────────────────────────────
-    # 자동 원근 보정
+    # 보정본으로 원본 파일 대체
+    # ──────────────────────────────────────────
+    def _replace_with_warped(self):
+        if self.warped_img is None:
+            messagebox.showwarning("경고", "먼저 보정을 적용하세요.")
+            return
+        if not self.orig_path:
+            messagebox.showwarning("경고", "원본 파일 경로를 알 수 없습니다.")
+            return
+
+        if not messagebox.askyesno(
+            "원본 파일 대체",
+            f"보정된 이미지로 원본 파일을 덮어씁니다.\n\n"
+            f"  {Path(self.orig_path).name}\n\n"
+            "이 작업은 되돌릴 수 없습니다. 계속하시겠습니까?",
+        ):
+            return
+
+        ext = Path(self.orig_path).suffix.lower()
+        encode_ext = '.jpg' if ext in {'.jpg', '.jpeg'} else \
+                     '.png' if ext in {'.tiff', '.tif'} else ext
+        if encode_ext not in {'.jpg', '.png', '.bmp', '.webp'}:
+            encode_ext = '.jpg'
+
+        try:
+            ok, buf = cv2.imencode(encode_ext, self.warped_img)
+            if not ok:
+                raise RuntimeError("인코딩 실패")
+            buf.tofile(self.orig_path)
+        except Exception as e:
+            messagebox.showerror("저장 오류", f"파일 저장 실패\n{e}")
+            return
+
+        # 보정본을 새 원본으로 교체 → 다시 보정 불필요 상태로 리셋
+        self.orig_img   = self.warped_img.copy()
+        self.warped_img = None
+        self.corners    = []
+        self.mode       = 'view'
+        self.mode_lbl.configure(text="")
+        h, w = self.orig_img.shape[:2]
+        self.corners = [[0.0, 0.0], [float(w), 0.0],
+                        [float(w), float(h)], [0.0, float(h)]]
+        self._refresh_canvas()
+        self._apply_correction()
+        messagebox.showinfo("완료", "원본 파일을 보정된 이미지로 대체했습니다.")
+
+    # ── 자동 원근 보정
     # ──────────────────────────────────────────
     def _auto_correct(self):
         if self.orig_img is None:
