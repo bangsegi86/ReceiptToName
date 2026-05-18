@@ -32,6 +32,12 @@ try:
 except ImportError:
     HAS_TESSERACT = False
 
+try:
+    from paddleocr import PaddleOCR
+    HAS_PADDLE = True
+except ImportError:
+    HAS_PADDLE = False
+
 
 C = {
     'bg':        '#1e1e2e',
@@ -82,6 +88,12 @@ class ReceiptApp:
         self._tess_cmd:  str | None = None
         self._tess_data: str | None = None
         self._init_tesseract()
+
+        self._paddle:           object | None = None
+        self._paddle_ready:     bool          = False
+        self._paddle_init_lock: threading.Lock = threading.Lock()
+        if HAS_PADDLE:
+            threading.Thread(target=self._init_paddle, daemon=True).start()
 
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
@@ -1200,7 +1212,9 @@ class ReceiptApp:
         if idx == self.queue_idx and text:
             self.ocr_text.delete('1.0', tk.END)
             self.ocr_text.insert(tk.END, text)
-            self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식)")
+            engine = "PaddleOCR" if (HAS_PADDLE and self._paddle_ready) else \
+                     ("Tesseract" if (HAS_TESSERACT and self._tess_cmd) else "Windows OCR")
+            self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식, {engine})")
             self._loading = True
             if date:   self.date_var.set(date)
             if amount: self.amount_var.set(amount)
@@ -1465,12 +1479,20 @@ class ReceiptApp:
         img_copy   = target.copy()
 
         self.ocr_btn.configure(state=tk.DISABLED)
-        self.ocr_status_var.set("OCR 실행 중…")
+        if HAS_PADDLE and not self._paddle_ready:
+            self.ocr_status_var.set("PaddleOCR 초기화 중… (첫 실행 시 모델 다운로드)")
+        else:
+            engine = "PaddleOCR" if (HAS_PADDLE and self._paddle_ready) else \
+                     ("Tesseract" if (HAS_TESSERACT and self._tess_cmd) else "Windows OCR")
+            self.ocr_status_var.set(f"OCR 실행 중… ({engine})")
         self.ocr_progress.grid()
         self.ocr_progress.start(10)
         self.root.update()
 
         def worker():
+            # PaddleOCR가 아직 초기화 중이면 완료까지 대기
+            if HAS_PADDLE and not self._paddle_ready:
+                self._init_paddle()
             text = self._do_ocr(img_copy)
             self.root.after(0, lambda: self._ocr_done(text, target_idx))
 
@@ -1502,7 +1524,9 @@ class ReceiptApp:
             self.ocr_status_var.set("OCR 실패 — 직접 입력해 주세요")
             return
 
-        self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식)")
+        engine = "PaddleOCR" if (HAS_PADDLE and self._paddle_ready) else \
+                 ("Tesseract" if (HAS_TESSERACT and self._tess_cmd) else "Windows OCR")
+        self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식, {engine})")
         self.ocr_text.delete('1.0', tk.END)
         self.ocr_text.insert(tk.END, text)
 
@@ -1512,6 +1536,38 @@ class ReceiptApp:
         self._loading = False
 
     # ── Tesseract 경로 탐색 ───────────────────
+    # ── PaddleOCR 초기화 (백그라운드) ───────────
+    def _init_paddle(self):
+        with self._paddle_init_lock:
+            if self._paddle_ready:
+                return
+            try:
+                self._paddle = PaddleOCR(
+                    use_angle_cls=True,
+                    lang='korean',
+                    show_log=False,
+                )
+                self._paddle_ready = True
+            except Exception:
+                self._paddle = None
+                self._paddle_ready = False
+
+    # ── PaddleOCR 실행 ────────────────────────
+    def _paddle_ocr(self, img: np.ndarray) -> str:
+        try:
+            # PaddleOCR는 BGR numpy array를 직접 받음
+            result = self._paddle.ocr(img, cls=True)
+            lines = []
+            if result and result[0]:
+                for line in result[0]:
+                    if line and len(line) >= 2:
+                        text_info = line[1]
+                        if text_info and text_info[0]:
+                            lines.append(text_info[0])
+            return '\n'.join(lines)
+        except Exception:
+            return ''
+
     def _init_tesseract(self):
         import shutil
 
@@ -1581,11 +1637,19 @@ class ReceiptApp:
 
     # ── OCR 엔진 선택 ─────────────────────────
     def _do_ocr(self, img: np.ndarray) -> str:
+        # 1순위: PaddleOCR (원본 컬러 이미지)
+        if HAS_PADDLE and self._paddle_ready and self._paddle is not None:
+            text = self._paddle_ocr(img)
+            if text.strip():
+                return text
+
+        # 2순위: Tesseract (전처리 후)
         if HAS_TESSERACT and self._tess_cmd:
             text = self._tesseract_ocr(img)
             if text.strip():
                 return text
 
+        # 3순위: Windows 내장 OCR (폴백)
         fd, tmp = tempfile.mkstemp(suffix='.png')
         os.close(fd)
         try:
