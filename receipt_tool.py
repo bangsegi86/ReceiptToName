@@ -326,8 +326,20 @@ class ReceiptApp:
             cursor='hand2', bd=0,
         )
         self.batch_ocr_btn.grid(row=2, column=0, columnspan=2,
-                                sticky='ew', padx=8, pady=(6, 8))
+                                sticky='ew', padx=8, pady=(6, 2))
         lp.rowconfigure(2, weight=0)
+
+        self.batch_save_btn = tk.Button(
+            lp, text="✅  선택 항목 저장",
+            command=self._save_selected,
+            bg='#40a02b', fg='white', relief=tk.FLAT,
+            padx=10, pady=7, font=('맑은 고딕', 10, 'bold'),
+            activebackground=C['green'], activeforeground='#1e1e2e',
+            cursor='hand2', bd=0,
+        )
+        self.batch_save_btn.grid(row=3, column=0, columnspan=2,
+                                 sticky='ew', padx=8, pady=(2, 8))
+        lp.rowconfigure(3, weight=0)
 
         self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
 
@@ -769,34 +781,8 @@ class ReceiptApp:
     def _batch_worker(self, idx: int, total: int):
         """백그라운드 스레드: 파일 로드 → 자동 보정 → OCR."""
         try:
-            path = self.file_queue[idx]
-            raw  = np.fromfile(path, dtype=np.uint8)
-            img  = cv2.imdecode(raw, cv2.IMREAD_COLOR)
-            if img is None:
-                raise ValueError
-            # 자동 꼭짓점 검출 + 원근 보정
-            corners = self._detect_receipt(img)
-            if corners and len(corners) == 4:
-                src = np.float32(corners)
-                def _dims(s):
-                    w = max(int(max(np.linalg.norm(s[1]-s[0]),
-                                    np.linalg.norm(s[2]-s[3]))), 1)
-                    h = max(int(max(np.linalg.norm(s[3]-s[0]),
-                                    np.linalg.norm(s[2]-s[1]))), 1)
-                    return w, h
-                out_w, out_h = _dims(src)
-                oh, ow = img.shape[:2]
-                if (oh > ow * 1.2 and out_w > out_h) or \
-                   (ow > oh * 1.2 and out_h > out_w):
-                    src = np.float32([src[0], src[3], src[2], src[1]])
-                    out_w, out_h = _dims(src)
-                dst    = np.float32([[0, 0], [out_w-1, 0],
-                                     [out_w-1, out_h-1], [0, out_h-1]])
-                M      = cv2.getPerspectiveTransform(src, dst)
-                target = cv2.warpPerspective(img, M, (out_w, out_h))
-            else:
-                target = img
-            text = self._do_ocr(target)
+            target = self._load_and_warp(idx)
+            text   = self._do_ocr(target)
         except Exception:
             text = ''
         self.root.after(0, lambda: self._batch_done(idx, text, total))
@@ -833,6 +819,131 @@ class ReceiptApp:
         else:
             self.batch_ocr_btn.configure(
                 state=tk.NORMAL, text="선택 항목 OCR 실행")
+
+    # ──────────────────────────────────────────
+    # 선택 항목 일괄 저장
+    # ──────────────────────────────────────────
+    def _save_selected(self):
+        selected = self.receipt_tree.selection()
+        if not selected:
+            messagebox.showwarning("선택 없음", "저장할 항목을 목록에서 선택하세요.")
+            return
+
+        indices = [int(iid) for iid in selected]
+
+        # 누락 값 검사 — 하나라도 없으면 전체 차단
+        incomplete = []
+        for idx in indices:
+            rd = self.receipt_data[idx]
+            missing = []
+            if not rd['date']:   missing.append("결제일자")
+            if not rd['amount']: missing.append("합계금액")
+            if missing:
+                fname = Path(self.file_queue[idx]).name
+                incomplete.append(f"  • {fname}  [{', '.join(missing)} 없음]")
+
+        if incomplete:
+            msg = ("아래 항목에 값이 없어 저장할 수 없습니다.\n"
+                   "OCR 실행 또는 직접 입력 후 다시 시도하세요.\n\n"
+                   + "\n".join(incomplete))
+            messagebox.showwarning("저장 불가", msg)
+            return
+
+        self.batch_save_btn.configure(state=tk.DISABLED, text="저장 중…")
+        threading.Thread(
+            target=self._batch_save_worker,
+            args=(indices,),
+            daemon=True,
+        ).start()
+
+    def _batch_save_worker(self, indices: list):
+        exe_dir = Path(sys.argv[0]).resolve().parent
+        out_dir = exe_dir / '스캔된_영수증'
+        out_dir.mkdir(exist_ok=True)
+
+        saved, errors = 0, []
+
+        for idx in indices:
+            rd     = self.receipt_data[idx]
+            path   = self.file_queue[idx]
+            date   = rd['date']
+            amount = re.sub(r'[^\d]', '', rd['amount'])
+
+            try:
+                # 현재 화면의 파일은 보정본 재사용, 나머지는 자동 보정
+                if idx == self.queue_idx and self.warped_img is not None:
+                    target = self.warped_img.copy()
+                else:
+                    target = self._load_and_warp(idx)
+
+                ext = Path(path).suffix.lower()
+                if ext not in {'.jpg', '.jpeg', '.png', '.bmp',
+                               '.tiff', '.tif', '.webp'}:
+                    ext = '.jpg'
+                encode_ext = ('.jpg' if ext in {'.jpg', '.jpeg'} else
+                              '.png' if ext in {'.tiff', '.tif'} else ext)
+
+                base     = f"{date}_{amount}"
+                out_path = out_dir / f"{base}{ext}"
+                counter  = 1
+                while out_path.exists():
+                    out_path = out_dir / f"{base}_{counter}{ext}"
+                    counter += 1
+
+                ok, buf = cv2.imencode(encode_ext, target)
+                if not ok:
+                    raise RuntimeError("인코딩 실패")
+                buf.tofile(str(out_path))
+                saved += 1
+                self.root.after(0, lambda i=idx: self._mark_saved_in_list(i))
+
+            except Exception as e:
+                errors.append(f"{Path(path).name}: {e}")
+
+        self.root.after(0, lambda: self._batch_save_done(saved, errors))
+
+    def _load_and_warp(self, idx: int) -> np.ndarray:
+        """파일 로드 → 자동 꼭짓점 검출 → 원근 보정 이미지 반환."""
+        path = self.file_queue[idx]
+        raw  = np.fromfile(path, dtype=np.uint8)
+        img  = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+        if img is None:
+            raise ValueError(f"이미지 로드 실패: {path}")
+        corners = self._detect_receipt(img)
+        if not corners or len(corners) != 4:
+            return img
+
+        def _dims(s):
+            w = max(int(max(np.linalg.norm(s[1]-s[0]),
+                            np.linalg.norm(s[2]-s[3]))), 1)
+            h = max(int(max(np.linalg.norm(s[3]-s[0]),
+                            np.linalg.norm(s[2]-s[1]))), 1)
+            return w, h
+
+        src = np.float32(corners)
+        out_w, out_h = _dims(src)
+        oh, ow = img.shape[:2]
+        if (oh > ow * 1.2 and out_w > out_h) or \
+           (ow > oh * 1.2 and out_h > out_w):
+            src = np.float32([src[0], src[3], src[2], src[1]])
+            out_w, out_h = _dims(src)
+        dst = np.float32([[0, 0], [out_w-1, 0],
+                          [out_w-1, out_h-1], [0, out_h-1]])
+        M   = cv2.getPerspectiveTransform(src, dst)
+        return cv2.warpPerspective(img, M, (out_w, out_h))
+
+    def _mark_saved_in_list(self, idx: int):
+        if 0 <= idx < len(self.receipt_data):
+            self.receipt_data[idx]['saved'] = True
+            self._update_list_row(idx)
+
+    def _batch_save_done(self, saved: int, errors: list):
+        self.batch_save_btn.configure(state=tk.NORMAL, text="✅  선택 항목 저장")
+        if errors:
+            msg = f"{saved}개 저장 완료\n\n실패 목록:\n" + "\n".join(errors)
+            messagebox.showwarning("일부 저장 실패", msg)
+        else:
+            messagebox.showinfo("저장 완료", f"{saved}개 파일을 저장했습니다.")
 
     def _run_ocr(self):
         target = self.warped_img if self.warped_img is not None else self.orig_img
