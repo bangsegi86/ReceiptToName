@@ -461,10 +461,9 @@ class ReceiptApp:
             self.mode_lbl.configure(text="")
         else:
             self.mode = 'manual'
-            self.corners = []
-            self._draw_corners()
+            # 자동 감지된 꼭짓점 유지 — 드래그로 위치만 조정
             self.mode_lbl.configure(
-                text="[수동] 꼭짓점 4곳 클릭 ▶ 좌상 → 우상 → 우하 → 좌하")
+                text="[수동] 꼭짓점 드래그로 조정  ·  4개 미만이면 빈 곳 클릭으로 추가")
 
     # ──────────────────────────────────────────
     # 원근 변환 적용 (회전 자동 보정 포함)
@@ -525,23 +524,24 @@ class ReceiptApp:
     def _on_click(self, event):
         if self.orig_img is None:
             return
+
+        # 모드 무관하게: 꼭짓점 근처(18px) 클릭 → 드래그 시작
+        self.drag_idx = None
+        for i, pt in enumerate(self.corners):
+            cx, cy = self._i2c(pt)
+            if ((event.x - cx) ** 2 + (event.y - cy) ** 2) ** 0.5 < 18:
+                self.drag_idx = i
+                return
+
+        # 수동 모드 전용: 꼭짓점 없는 곳 클릭 → 4개 미만일 때만 추가
         if self.mode == 'manual':
             ix, iy = self._c2i(event.x, event.y)
             h, w   = self.orig_img.shape[:2]
-            if 0 <= ix <= w and 0 <= iy <= h:
-                if len(self.corners) >= 4:
-                    self.corners = []
+            if 0 <= ix <= w and 0 <= iy <= h and len(self.corners) < 4:
                 self.corners.append([ix, iy])
                 self._draw_corners()
                 if len(self.corners) == 4:
                     self._apply_correction()
-        else:
-            self.drag_idx = None
-            for i, pt in enumerate(self.corners):
-                cx, cy = self._i2c(pt)
-                if ((event.x - cx) ** 2 + (event.y - cy) ** 2) ** 0.5 < 15:
-                    self.drag_idx = i
-                    break
 
     def _on_drag(self, event):
         if self.drag_idx is None or self.orig_img is None:
