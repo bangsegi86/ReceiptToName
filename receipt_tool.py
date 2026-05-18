@@ -300,7 +300,7 @@ class ReceiptApp:
 
         cols = ('file', 'date', 'amount')
         self.receipt_tree = ttk.Treeview(lp, columns=cols, show='headings',
-                                          selectmode='browse')
+                                          selectmode='extended')
         self.receipt_tree.heading('file',   text='파일명')
         self.receipt_tree.heading('date',   text='결제일자')
         self.receipt_tree.heading('amount', text='합계금액')
@@ -318,8 +318,21 @@ class ReceiptApp:
         self.receipt_tree.configure(yscrollcommand=vsb.set)
 
         self.receipt_tree.grid(row=1, column=0, sticky='nsew',
-                               padx=(8, 0), pady=(0, 8))
-        vsb.grid(row=1, column=1, sticky='ns', padx=(0, 8), pady=(0, 8))
+                               padx=(8, 0), pady=(0, 0))
+        vsb.grid(row=1, column=1, sticky='ns', padx=(0, 8), pady=(0, 0))
+
+        # 선택 항목 OCR 실행 버튼
+        self.batch_ocr_btn = tk.Button(
+            lp, text="선택 항목 OCR 실행",
+            command=self._run_ocr_batch,
+            bg=C['accent'], fg='#1e1e2e', relief=tk.FLAT,
+            padx=10, pady=7, font=('맑은 고딕', 10, 'bold'),
+            activebackground=C['button'], activeforeground=C['text'],
+            cursor='hand2', bd=0,
+        )
+        self.batch_ocr_btn.grid(row=2, column=0, columnspan=2,
+                                sticky='ew', padx=8, pady=(6, 8))
+        lp.rowconfigure(2, weight=0)
 
         self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
 
@@ -402,10 +415,11 @@ class ReceiptApp:
             self.receipt_tree.see(iid)
 
     def _on_list_select(self, _event):
-        sel = self.receipt_tree.selection()
-        if not sel:
+        # 다중 선택 모드: 네비게이션은 포커스 아이템(마지막 클릭)만 따라감
+        focused = self.receipt_tree.focus()
+        if not focused:
             return
-        idx = int(sel[0])
+        idx = int(focused)
         if idx != self.queue_idx:
             self.queue_idx = idx
             self._load_current()
@@ -493,10 +507,6 @@ class ReceiptApp:
         self._select_list_row(self.queue_idx)
         self._refresh_canvas()
         self._auto_correct()
-
-        # OCR 미실행 파일이면 자동 실행
-        if rd and not rd['ocr_done']:
-            self.root.after(250, self._run_ocr_auto)
 
     def _update_nav_ui(self):
         n = len(self.file_queue)
@@ -734,17 +744,108 @@ class ReceiptApp:
     # ──────────────────────────────────────────
     # OCR
     # ──────────────────────────────────────────
-    def _run_ocr_auto(self):
-        """파일 전환 시 자동 실행 - 이미 진행 중이면 스킵."""
-        if self.ocr_btn['state'] == tk.DISABLED:
+    def _run_ocr_batch(self):
+        """목록에서 선택된 항목 전체에 OCR 실행 (백그라운드 병렬)."""
+        selected = self.receipt_tree.selection()
+        if not selected:
+            messagebox.showwarning("선택 없음", "목록에서 OCR 할 항목을 선택하세요.\n(Ctrl+클릭으로 다중 선택)")
             return
-        self._run_ocr(auto=True)
 
-    def _run_ocr(self, auto=False):
+        indices = [int(iid) for iid in selected]
+        total   = len(indices)
+        self._batch_remaining = total
+        self.batch_ocr_btn.configure(state=tk.DISABLED,
+                                     text=f"OCR 실행 중… (0/{total})")
+
+        for idx in indices:
+            # 진행 중 표시
+            self._mark_list_processing(idx)
+            threading.Thread(
+                target=self._batch_worker,
+                args=(idx, total),
+                daemon=True,
+            ).start()
+
+    def _mark_list_processing(self, idx: int):
+        try:
+            vals = list(self.receipt_tree.item(str(idx), 'values'))
+            vals[1] = '처리중…'
+            self.receipt_tree.item(str(idx), values=vals)
+        except tk.TclError:
+            pass
+
+    def _batch_worker(self, idx: int, total: int):
+        """백그라운드 스레드: 파일 로드 → 자동 보정 → OCR."""
+        try:
+            path = self.file_queue[idx]
+            raw  = np.fromfile(path, dtype=np.uint8)
+            img  = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError
+            # 자동 꼭짓점 검출 + 원근 보정
+            corners = self._detect_receipt(img)
+            if corners and len(corners) == 4:
+                src = np.float32(corners)
+                def _dims(s):
+                    w = max(int(max(np.linalg.norm(s[1]-s[0]),
+                                    np.linalg.norm(s[2]-s[3]))), 1)
+                    h = max(int(max(np.linalg.norm(s[3]-s[0]),
+                                    np.linalg.norm(s[2]-s[1]))), 1)
+                    return w, h
+                out_w, out_h = _dims(src)
+                oh, ow = img.shape[:2]
+                if (oh > ow * 1.2 and out_w > out_h) or \
+                   (ow > oh * 1.2 and out_h > out_w):
+                    src = np.float32([src[0], src[3], src[2], src[1]])
+                    out_w, out_h = _dims(src)
+                dst    = np.float32([[0, 0], [out_w-1, 0],
+                                     [out_w-1, out_h-1], [0, out_h-1]])
+                M      = cv2.getPerspectiveTransform(src, dst)
+                target = cv2.warpPerspective(img, M, (out_w, out_h))
+            else:
+                target = img
+            text = self._do_ocr(target)
+        except Exception:
+            text = ''
+        self.root.after(0, lambda: self._batch_done(idx, text, total))
+
+    def _batch_done(self, idx: int, text: str, total: int):
+        """메인 스레드: OCR 결과 반영 후 카운터 갱신."""
+        date = amount = ''
+        if text:
+            date   = self._parse_date(text)
+            amount = self._parse_amount(text)
+
+        if 0 <= idx < len(self.receipt_data):
+            rd = self.receipt_data[idx]
+            rd['ocr_done'] = True
+            if date:   rd['date']   = date
+            if amount: rd['amount'] = amount
+            self._update_list_row(idx)
+
+        # 현재 화면에 표시 중인 파일이면 우측 패널도 갱신
+        if idx == self.queue_idx and text:
+            self.ocr_text.delete('1.0', tk.END)
+            self.ocr_text.insert(tk.END, text)
+            self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식)")
+            self._loading = True
+            if date:   self.date_var.set(date)
+            if amount: self.amount_var.set(amount)
+            self._loading = False
+
+        self._batch_remaining -= 1
+        done = total - self._batch_remaining
+        if self._batch_remaining > 0:
+            self.batch_ocr_btn.configure(
+                text=f"OCR 실행 중… ({done}/{total})")
+        else:
+            self.batch_ocr_btn.configure(
+                state=tk.NORMAL, text="선택 항목 OCR 실행")
+
+    def _run_ocr(self):
         target = self.warped_img if self.warped_img is not None else self.orig_img
         if target is None:
-            if not auto:
-                messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
+            messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
             return
 
         target_idx = self.queue_idx
