@@ -91,9 +91,10 @@ class ReceiptApp:
 
         self._paddle:           object | None = None
         self._paddle_ready:     bool          = False
+        self._paddle_error:     str | None    = None
         self._paddle_init_lock: threading.Lock = threading.Lock()
         if HAS_PADDLE:
-            threading.Thread(target=self._init_paddle, daemon=True).start()
+            threading.Thread(target=self._paddle_init_bg, daemon=True).start()
 
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
@@ -1543,8 +1544,17 @@ class ReceiptApp:
         if amount: self.amount_var.set(amount)
         self._loading = False
 
-    # ── Tesseract 경로 탐색 ───────────────────
-    # ── PaddleOCR 초기화 (백그라운드) ───────────
+    # ── PaddleOCR 초기화 (백그라운드 래퍼) ────────
+    def _paddle_init_bg(self):
+        self._init_paddle()
+        if self._paddle_ready:
+            self.root.after(0, lambda: self.ocr_status_var.set("PaddleOCR 준비 완료"))
+        else:
+            err = self._paddle_error or "알 수 없는 오류"
+            self.root.after(0, lambda: self.ocr_status_var.set(
+                f"PaddleOCR 초기화 실패 → Tesseract 사용\n오류: {err[:80]}"))
+
+    # ── PaddleOCR 초기화 ─────────────────────────
     def _init_paddle(self):
         with self._paddle_init_lock:
             if self._paddle_ready:
@@ -1556,9 +1566,13 @@ class ReceiptApp:
                     show_log=False,
                 )
                 self._paddle_ready = True
-            except Exception:
+                self._paddle_error = None
+            except Exception as e:
                 self._paddle = None
                 self._paddle_ready = False
+                self._paddle_error = str(e)
+
+    # ── Tesseract 경로 탐색 ───────────────────
 
     # ── PaddleOCR 실행 ────────────────────────
     def _paddle_ocr(self, img: np.ndarray) -> str:
