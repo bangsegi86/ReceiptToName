@@ -121,7 +121,7 @@ class ReceiptApp:
 
     # ── UI ────────────────────────────────────
     def _build_ui(self):
-        self.root.columnconfigure(0, weight=0, minsize=270)  # 목록 패널
+        self.root.columnconfigure(0, weight=0, minsize=380)  # 목록 패널
         self.root.columnconfigure(1, weight=3)               # 이미지 캔버스
         self.root.columnconfigure(2, weight=0, minsize=310)  # 우측 패널
         self.root.rowconfigure(0, weight=1)
@@ -330,15 +330,17 @@ class ReceiptApp:
             tk.Label(legend, text=label, bg=C['panel'], fg=C['dim'],
                      font=('맑은 고딕', 8)).pack(side=tk.LEFT, padx=(1, 8))
 
-        cols = ('file', 'date', 'amount')
+        cols = ('file', 'date', 'amount', 'size')
         self.receipt_tree = ttk.Treeview(lp, columns=cols, show='headings',
                                           selectmode='extended')
         self.receipt_tree.heading('file',   text='파일명')
         self.receipt_tree.heading('date',   text='결제일자')
         self.receipt_tree.heading('amount', text='합계금액')
-        self.receipt_tree.column('file',   width=105, minwidth=60, stretch=True)
-        self.receipt_tree.column('date',   width=78,  minwidth=70, stretch=False, anchor='center')
-        self.receipt_tree.column('amount', width=72,  minwidth=55, stretch=False, anchor='e')
+        self.receipt_tree.heading('size',   text='크기 (현재→압축후)')
+        self.receipt_tree.column('file',   width=85,  minwidth=55, stretch=True)
+        self.receipt_tree.column('date',   width=72,  minwidth=65, stretch=False, anchor='center')
+        self.receipt_tree.column('amount', width=65,  minwidth=55, stretch=False, anchor='e')
+        self.receipt_tree.column('size',   width=130, minwidth=100, stretch=False, anchor='center')
 
         # 인식 상태별 색상
         self.receipt_tree.tag_configure('done',    foreground=C['green'])   # 날짜+금액 모두
@@ -375,8 +377,20 @@ class ReceiptApp:
             cursor='hand2', bd=0,
         )
         self.batch_save_btn.grid(row=5, column=0, columnspan=2,
-                                 sticky='ew', padx=8, pady=(2, 8))
+                                 sticky='ew', padx=8, pady=(2, 2))
         lp.rowconfigure(5, weight=0)
+
+        self.compress_btn = tk.Button(
+            lp, text="🗜  선택 항목 압축 저장",
+            command=self._compress_selected,
+            bg=C['button'], fg=C['text'], relief=tk.FLAT,
+            padx=10, pady=7, font=('맑은 고딕', 10, 'bold'),
+            activebackground=C['surface'], activeforeground=C['text'],
+            cursor='hand2', bd=0,
+        )
+        self.compress_btn.grid(row=6, column=0, columnspan=2,
+                               sticky='ew', padx=8, pady=(2, 8))
+        lp.rowconfigure(6, weight=0)
 
         self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
         self.receipt_tree.bind('<Double-Button-1>',  self._on_tree_double_click)
@@ -427,7 +441,7 @@ class ReceiptApp:
         if not item:
             return
         col_idx = int(col[1:]) - 1
-        if col_idx == 0:
+        if col_idx not in (1, 2):   # 결제일자·합계금액만 편집 가능
             return
         self._active_col = col_idx
         self._start_cell_edit(item, col_idx)
@@ -592,42 +606,63 @@ class ReceiptApp:
     # ──────────────────────────────────────────
     def _init_receipt_data(self, paths: list):
         self.receipt_data = [
-            {'date': '', 'amount': '', 'ocr_done': False, 'saved': False}
+            {'date': '', 'amount': '', 'ocr_done': False, 'saved': False,
+             'file_size': 0, 'compressed_size': -1}
             for _ in paths
         ]
         self._refresh_list()
         self._update_summary()
+        # 파일 크기 순차 계산
+        self._size_queue = list(range(len(paths)))
+        self._size_next()
 
     def _refresh_list(self):
         self.receipt_tree.delete(*self.receipt_tree.get_children())
         for i, (path, data) in enumerate(zip(self.file_queue, self.receipt_data)):
-            fname = Path(path).name
-            if len(fname) > 15:
-                fname = fname[:12] + '...'
-            date_disp   = data['date'] if data['date'] else '-'
-            amount_disp = self._fmt_amount(data['amount'])
-            tag = self._row_tag(data)
             self.receipt_tree.insert('', 'end', iid=str(i),
-                                     values=(fname, date_disp, amount_disp),
-                                     tags=(tag,))
+                                     values=self._row_values(i, path, data),
+                                     tags=(self._row_tag(data),))
         self._select_list_row(self.queue_idx)
 
     def _update_list_row(self, idx: int):
         if idx >= len(self.receipt_data) or idx >= len(self.file_queue):
             return
-        data  = self.receipt_data[idx]
-        fname = Path(self.file_queue[idx]).name
-        if len(fname) > 15:
-            fname = fname[:12] + '...'
-        date_disp   = data['date'] if data['date'] else '-'
-        amount_disp = self._fmt_amount(data['amount'])
-        tag = self._row_tag(data)
+        data = self.receipt_data[idx]
         try:
             self.receipt_tree.item(str(idx),
-                                   values=(fname, date_disp, amount_disp),
-                                   tags=(tag,))
+                                   values=self._row_values(idx, self.file_queue[idx], data),
+                                   tags=(self._row_tag(data),))
         except tk.TclError:
             pass
+
+    def _row_values(self, idx: int, path: str, data: dict) -> tuple:
+        fname = Path(path).name
+        if len(fname) > 13:
+            fname = fname[:10] + '...'
+        date_disp   = data['date'] if data['date'] else '-'
+        amount_disp = self._fmt_amount(data['amount'])
+        size_disp   = self._fmt_size_col(data)
+        return (fname, date_disp, amount_disp, size_disp)
+
+    def _fmt_size_col(self, data: dict) -> str:
+        fs = data.get('file_size', 0)
+        cs = data.get('compressed_size', -1)
+        if fs <= 0:
+            return '계산중…' if cs == -1 else '-'
+        cur = self._fmt_size(fs)
+        if cs == -1:
+            return f"{cur} → ?"
+        if cs >= fs:
+            return f"{cur} (최소)"
+        return f"{cur} → {self._fmt_size(cs)}"
+
+    @staticmethod
+    def _fmt_size(nbytes: int) -> str:
+        if nbytes >= 1_048_576:
+            return f"{nbytes / 1_048_576:.1f}MB"
+        if nbytes >= 1_024:
+            return f"{nbytes / 1_024:.0f}KB"
+        return f"{nbytes}B"
 
     def _fmt_amount(self, amount: str) -> str:
         if not amount:
@@ -1220,6 +1255,123 @@ class ReceiptApp:
             messagebox.showwarning("일부 저장 실패", msg)
         else:
             messagebox.showinfo("저장 완료", f"{saved}개 파일을 저장했습니다.")
+
+    # ──────────────────────────────────────────
+    # 파일 크기 계산 (순차 백그라운드)
+    # ──────────────────────────────────────────
+    def _size_next(self):
+        if not hasattr(self, '_size_queue') or not self._size_queue:
+            return
+        idx = self._size_queue.pop(0)
+        threading.Thread(target=self._size_worker, args=(idx,), daemon=True).start()
+
+    def _size_worker(self, idx: int):
+        try:
+            path      = self.file_queue[idx]
+            file_size = os.path.getsize(path)
+            raw  = np.fromfile(path, dtype=np.uint8)
+            img  = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError
+            ext = Path(path).suffix.lower()
+            compressed_size = self._encode_compressed_buf(img, ext)
+        except Exception:
+            file_size = compressed_size = 0
+        self.root.after(0, lambda: self._size_done(idx, file_size, compressed_size))
+
+    def _encode_compressed_buf(self, img: np.ndarray, ext: str) -> int:
+        if ext == '.png':
+            ok, buf = cv2.imencode('.png', img,
+                                   [cv2.IMWRITE_PNG_COMPRESSION, 9])
+        else:
+            ok, buf = cv2.imencode('.jpg', img,
+                                   [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return len(buf) if ok else 0
+
+    def _size_done(self, idx: int, file_size: int, compressed_size: int):
+        if idx >= len(self.receipt_data):
+            return
+        rd = self.receipt_data[idx]
+        rd['file_size']       = file_size
+        rd['compressed_size'] = compressed_size
+        self._update_list_row(idx)
+        self._size_next()   # 다음 파일 계산
+
+    # ──────────────────────────────────────────
+    # 선택 항목 압축 저장
+    # ──────────────────────────────────────────
+    def _compress_selected(self):
+        selected = self.receipt_tree.selection()
+        if not selected:
+            messagebox.showwarning("선택 없음", "압축할 항목을 선택하세요.")
+            return
+        self._compress_queue  = [int(iid) for iid in selected]
+        self._compress_total  = len(self._compress_queue)
+        self._compress_done_n = 0
+        self._compress_errors = []
+        self.compress_btn.configure(state=tk.DISABLED,
+                                    text=f"압축 중… (0/{self._compress_total})")
+        self._compress_next_item()
+
+    def _compress_next_item(self):
+        if not self._compress_queue:
+            self.compress_btn.configure(state=tk.NORMAL, text="🗜  선택 항목 압축 저장")
+            msg = f"{self._compress_total - len(self._compress_errors)}개 압축 완료"
+            if self._compress_errors:
+                msg += "\n\n실패:\n" + "\n".join(self._compress_errors)
+                messagebox.showwarning("압축 완료 (일부 실패)", msg)
+            else:
+                messagebox.showinfo("압축 완료", msg +
+                                    "\n파일명 앞에 'resize_' 가 붙어 원본 폴더에 저장됐습니다.")
+            return
+        idx = self._compress_queue.pop(0)
+        threading.Thread(target=self._compress_worker, args=(idx,), daemon=True).start()
+
+    def _compress_worker(self, idx: int):
+        try:
+            path   = self.file_queue[idx]
+            raw    = np.fromfile(path, dtype=np.uint8)
+            img    = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError("이미지 로드 실패")
+
+            ext      = Path(path).suffix.lower()
+            parent   = Path(path).parent
+            stem     = Path(path).stem
+
+            if ext == '.png':
+                encode_ext = '.png'
+                params     = [cv2.IMWRITE_PNG_COMPRESSION, 9]
+            else:
+                encode_ext = '.jpg'
+                params     = [cv2.IMWRITE_JPEG_QUALITY, 85]
+
+            # 이미 resize_ 접두어가 있으면 그대로
+            out_stem = stem if stem.startswith('resize_') else f'resize_{stem}'
+            out_path = parent / f'{out_stem}{encode_ext}'
+
+            ok, buf = cv2.imencode(encode_ext, img, params)
+            if not ok:
+                raise RuntimeError("인코딩 실패")
+            buf.tofile(str(out_path))
+            new_size = len(buf)
+            self.root.after(0, lambda: self._compress_item_done(idx, new_size, None))
+        except Exception as e:
+            err = f"{Path(self.file_queue[idx]).name}: {e}"
+            self.root.after(0, lambda: self._compress_item_done(idx, 0, err))
+
+    def _compress_item_done(self, idx: int, new_size: int, error: str | None):
+        if error:
+            self._compress_errors.append(error)
+        else:
+            if 0 <= idx < len(self.receipt_data):
+                # 압축 후 크기를 compressed_size에 반영
+                self.receipt_data[idx]['compressed_size'] = new_size
+                self._update_list_row(idx)
+        self._compress_done_n += 1
+        self.compress_btn.configure(
+            text=f"압축 중… ({self._compress_done_n}/{self._compress_total})")
+        self._compress_next_item()
 
     def _run_ocr(self):
         target = self.warped_img if self.warped_img is not None else self.orig_img
