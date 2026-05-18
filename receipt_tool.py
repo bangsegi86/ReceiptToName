@@ -466,41 +466,36 @@ class ReceiptApp:
                 text="[수동] 꼭짓점 드래그로 조정  ·  4개 미만이면 빈 곳 클릭으로 추가")
 
     # ──────────────────────────────────────────
-    # 원근 변환 적용 (회전 자동 보정 포함)
+    # 원근 변환 적용 (방향 불일치 시 꼭짓점 재정렬)
     # ──────────────────────────────────────────
     def _apply_correction(self):
         if self.orig_img is None or len(self.corners) != 4:
             return
 
-        src  = np.float32(self.corners)
-        w1   = np.linalg.norm(src[1] - src[0])
-        w2   = np.linalg.norm(src[2] - src[3])
-        h1   = np.linalg.norm(src[3] - src[0])
-        h2   = np.linalg.norm(src[2] - src[1])
-        out_w = max(int(max(w1, w2)), 1)
-        out_h = max(int(max(h1, h2)), 1)
+        def _dims(s):
+            w = max(int(max(np.linalg.norm(s[1]-s[0]),
+                            np.linalg.norm(s[2]-s[3]))), 1)
+            h = max(int(max(np.linalg.norm(s[3]-s[0]),
+                            np.linalg.norm(s[2]-s[1]))), 1)
+            return w, h
 
-        dst = np.float32([[0, 0], [out_w - 1, 0],
-                          [out_w - 1, out_h - 1], [0, out_h - 1]])
+        src   = np.float32(self.corners)
+        out_w, out_h = _dims(src)
+
+        # 원본이 세로인데 결과가 가로로 나오면 → corners[1]↔corners[3] 교환
+        # (잘못된 꼭짓점 순서를 변환 전에 보정해 회전 왜곡 방지)
+        oh, ow = self.orig_img.shape[:2]
+        orig_portrait  = oh > ow * 1.2
+        orig_landscape = ow > oh * 1.2
+        if (orig_portrait  and out_w > out_h) or \
+           (orig_landscape and out_h > out_w):
+            src = np.float32([src[0], src[3], src[2], src[1]])
+            out_w, out_h = _dims(src)
+
+        dst    = np.float32([[0, 0], [out_w-1, 0],
+                             [out_w-1, out_h-1], [0, out_h-1]])
         M      = cv2.getPerspectiveTransform(src, dst)
         warped = cv2.warpPerspective(self.orig_img, M, (out_w, out_h))
-
-        # ── 방향 자동 보정 ──
-        # 원본 이미지가 세로(portrait)인데 결과가 가로(landscape)이면 90° 회전
-        oh, ow = self.orig_img.shape[:2]
-        wh, ww = warped.shape[:2]
-        orig_portrait = oh > ow * 1.2
-        out_landscape = ww > wh * 1.2
-        orig_landscape = ow > oh * 1.2
-        out_portrait   = wh > ww * 1.2
-        if (orig_portrait and out_landscape) or (orig_landscape and out_portrait):
-            # TL→TR 벡터로 회전 방향 결정
-            p0, p1 = np.array(self.corners[0]), np.array(self.corners[1])
-            delta  = p1 - p0
-            if abs(delta[1]) > abs(delta[0]):   # 첫 번째 모서리가 아래로 향함
-                warped = cv2.rotate(warped, cv2.ROTATE_90_CLOCKWISE)
-            else:
-                warped = cv2.rotate(warped, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         self.warped_img = warped
         self._update_preview(warped)
@@ -605,12 +600,19 @@ class ReceiptApp:
 
     # ── Windows 내장 OCR ─────────────────────
     def _windows_ocr(self, img_path: str) -> str:
-        abs_path = os.path.abspath(img_path).replace('/', '\\')
+        """
+        stdout 대신 임시 파일에 결과를 저장하는 방식으로
+        한글 Windows CP949 인코딩 문제를 근본 해결.
+        PowerShell이 UTF-8(BOM 없음)로 파일에 기록 → Python이 읽음.
+        """
+        abs_img  = os.path.abspath(img_path).replace('/', '\\')
+
+        # 결과를 받을 임시 텍스트 파일
+        fd, txt_path = tempfile.mkstemp(suffix='.txt')
+        os.close(fd)
+        abs_txt = txt_path.replace('/', '\\')
 
         ps = (
-            # ★ 한글 Windows에서 CP949로 출력되는 문제 해결
-            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
-            "$OutputEncoding=[System.Text.Encoding]::UTF8\n"
             "$ErrorActionPreference='Stop'\n"
             "Add-Type -AssemblyName System.Runtime.WindowsRuntime\n"
             "$m=[System.WindowsRuntimeSystemExtensions].GetMethods()\n"
@@ -625,8 +627,9 @@ class ReceiptApp:
             "[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime]|Out-Null\n"
             "[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime]|Out-Null\n"
             "[Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics,ContentType=WindowsRuntime]|Out-Null\n"
-            f"$path='{abs_path}'\n"
-            "$file=Await([Windows.Storage.StorageFile]::GetFileFromPathAsync($path))"
+            f"$imgPath='{abs_img}'\n"
+            f"$txtPath='{abs_txt}'\n"
+            "$file=Await([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath))"
             "  ([Windows.Storage.StorageFile])\n"
             "$stream=Await($file.OpenAsync([Windows.Storage.FileAccessMode]::Read))"
             "  ([Windows.Storage.Streams.IRandomAccessStream])\n"
@@ -640,7 +643,9 @@ class ReceiptApp:
             "  $engine=[Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang)}\n"
             "if(-not $engine){exit 1}\n"
             "$r=Await($engine.RecognizeAsync($bitmap))([Windows.Media.Ocr.OcrResult])\n"
-            "$r.Text\n"
+            # stdout 대신 파일 기록 (BOM 없는 UTF-8)
+            "[System.IO.File]::WriteAllText($txtPath,$r.Text,"
+            "  [System.Text.UTF8Encoding]::new($false))\n"
         )
 
         try:
@@ -649,19 +654,17 @@ class ReceiptApp:
                  '-NoProfile', '-NonInteractive', '-Command', ps],
                 capture_output=True, timeout=45,
             )
-            if proc.returncode != 0 or not proc.stdout:
-                return ''
-            # 여러 인코딩을 순서대로 시도 (한글 Windows 대응)
-            for enc in ('utf-8-sig', 'utf-8', 'cp949', 'euc-kr'):
-                try:
-                    text = proc.stdout.decode(enc).strip()
-                    if text:
-                        return text
-                except (UnicodeDecodeError, LookupError):
-                    continue
+            if proc.returncode == 0 and os.path.getsize(txt_path) > 0:
+                with open(txt_path, 'r', encoding='utf-8') as f:
+                    return f.read().strip()
             return ''
         except Exception:
             return ''
+        finally:
+            try:
+                os.unlink(txt_path)
+            except OSError:
+                pass
 
     # ── 날짜 파싱 ─────────────────────────────
     def _parse_date(self, text: str) -> str:
