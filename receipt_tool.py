@@ -1031,26 +1031,64 @@ class ReceiptApp:
         self._apply_correction()
 
     def _detect_receipt(self, img):
-        h, w   = img.shape[:2]
-        gray   = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blur   = cv2.GaussianBlur(gray, (5, 5), 0)
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        for lo, hi in [(30, 100), (50, 150), (80, 200)]:
-            edges  = cv2.Canny(blur, lo, hi)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-            closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+        # ① CLAHE로 대비 강화
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        # 다양한 엣지 맵 시도
+        candidates = []
+        for blur_k in (5, 9):
+            blurred = cv2.GaussianBlur(enhanced, (blur_k, blur_k), 0)
+            for lo, hi in [(20, 80), (30, 120), (50, 150), (80, 200)]:
+                candidates.append(cv2.Canny(blurred, lo, hi))
+
+        # ② 적응형 이진화 기반 엣지도 추가
+        blurred = cv2.GaussianBlur(enhanced, (9, 9), 0)
+        thresh = cv2.adaptiveThreshold(blurred, 255,
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY_INV, 21, 10)
+        candidates.append(thresh)
+
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+
+        for edge_map in candidates:
+            closed = cv2.morphologyEx(edge_map, cv2.MORPH_CLOSE, close_kernel)
             cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
             cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-            for cnt in cnts[:8]:
-                if cv2.contourArea(cnt) < w * h * 0.08:
+            for cnt in cnts[:5]:
+                if cv2.contourArea(cnt) < w * h * 0.05:
                     continue
                 peri = cv2.arcLength(cnt, True)
-                for eps in (0.02, 0.03, 0.05):
+                # ③ epsilon 범위를 넓게 시도
+                for eps in (0.01, 0.02, 0.03, 0.05, 0.08):
                     approx = cv2.approxPolyDP(cnt, eps * peri, True)
                     if len(approx) == 4:
                         pts = approx.reshape(4, 2).astype(float).tolist()
                         return self._order_pts(pts)
+
+        # ④ 폴백: 가장 큰 윤곽선의 볼록 껍질에서 극단 4점 추출
+        all_cnts = []
+        for edge_map in candidates:
+            closed = cv2.morphologyEx(edge_map, cv2.MORPH_CLOSE, close_kernel)
+            cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            all_cnts.extend(cnts)
+        if all_cnts:
+            biggest = max(all_cnts, key=cv2.contourArea)
+            if cv2.contourArea(biggest) > w * h * 0.05:
+                hull = cv2.convexHull(biggest).reshape(-1, 2).astype(float)
+                # 극단 4점 (좌상·우상·우하·좌하)
+                s, d = hull.sum(1), np.diff(hull, axis=1).flatten()
+                pts = [hull[np.argmin(s)].tolist(),
+                       hull[np.argmin(d)].tolist(),
+                       hull[np.argmax(s)].tolist(),
+                       hull[np.argmax(d)].tolist()]
+                return self._order_pts(pts)
+
         return None
 
     def _order_pts(self, pts):
