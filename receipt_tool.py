@@ -278,12 +278,7 @@ class ReceiptApp:
                   padx=14, pady=12, font=('맑은 고딕', 12, 'bold'),
                   activebackground=C['green'], activeforeground='#1e1e2e',
                   cursor='hand2', bd=0
-                  ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 4))
-        row += 1
-
-        btn(right, "⏭  저장 없이 다음 파일", self._skip_file,
-            C['surface'], C['subtext']
-            ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 12))
+                  ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 12))
 
     # ── 영수증 목록 패널 ──────────────────────
     def _build_list_panel(self):
@@ -529,9 +524,6 @@ class ReceiptApp:
         if self.queue_idx < len(self.file_queue) - 1:
             self.queue_idx += 1
             self._load_current()
-
-    def _skip_file(self):
-        self._next_file()
 
     # ──────────────────────────────────────────
     # 이미지 표시 (여백 포함)
@@ -1161,11 +1153,6 @@ class ReceiptApp:
         if remaining > 0:
             msg += f"\n\n남은 파일: {remaining}장 → 자동으로 다음 파일을 불러옵니다."
         messagebox.showinfo("저장 완료", msg)
-
-        try:
-            subprocess.Popen(f'explorer /select,"{out_path}"', shell=True)
-        except Exception:
-            pass
 
         if remaining > 0:
             self._next_file()
