@@ -176,28 +176,29 @@ class ReceiptApp:
         bf = tk.Frame(left, bg=C['panel'])
         bf.grid(row=2, column=0, sticky='ew', padx=10, pady=(4, 10))
 
-        def btn(parent, text, cmd, bg=C['surface'], fg=C['text']):
+        def btn(parent, text, cmd, bg=C['surface'], fg=C['text'], bold=False):
+            f = ('맑은 고딕', 9, 'bold') if bold else ('맑은 고딕', 9)
             return tk.Button(parent, text=text, command=cmd,
                              bg=bg, fg=fg, relief=tk.FLAT,
-                             padx=12, pady=7, font=('맑은 고딕', 10),
+                             padx=8, pady=5, font=f, justify=tk.CENTER,
                              activebackground=C['button'], activeforeground=C['text'],
                              cursor='hand2', bd=0)
 
-        btn(bf, "📂  파일 열기",  self._open_file,   C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
-        btn(bf, "✨  자동 보정",  self._auto_correct).pack(side=tk.LEFT, padx=2)
-        btn(bf, "✏️  수동 조정",  self._toggle_manual).pack(side=tk.LEFT, padx=2)
-        btn(bf, "💾  보정본으로 원본 대체", self._replace_with_warped,
-            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
-        btn(bf, "📋  현재 이미지 복사", self._copy_image_to_clipboard,
-            C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
-        btn(bf, "🗜  현재 이미지 압축 저장", self._compress_current,
-            C['surface']).pack(side=tk.LEFT, padx=2)
-
-        tk.Frame(bf, bg=C['panel'], width=12).pack(side=tk.LEFT)
-        self.prev_btn = btn(bf, "◀ 이전", self._prev_file)
-        self.prev_btn.pack(side=tk.LEFT, padx=2)
+        # 이전/다음은 오른쪽에 고정 (RIGHT pack → 항상 보임)
         self.next_btn = btn(bf, "다음 ▶", self._next_file)
-        self.next_btn.pack(side=tk.LEFT, padx=2)
+        self.next_btn.pack(side=tk.RIGHT, padx=2)
+        self.prev_btn = btn(bf, "◀ 이전", self._prev_file)
+        self.prev_btn.pack(side=tk.RIGHT, padx=2)
+        tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.RIGHT)
+
+        # 보정 관련 버튼 — 2줄 텍스트로 폭 축소
+        btn(bf, "✨\n자동 보정",   self._auto_correct).pack(side=tk.LEFT, padx=2)
+        btn(bf, "✏️\n수동 조정",   self._toggle_manual).pack(side=tk.LEFT, padx=2)
+        btn(bf, "💾\n원본 대체",   self._replace_with_warped,
+            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        btn(bf, "📋\n이미지 복사", self._copy_image_to_clipboard,
+            C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        btn(bf, "🗜\n압축 저장",   self._compress_current).pack(side=tk.LEFT, padx=2)
 
         # ─ 우측 패널 ─
         right = tk.Frame(self.root, bg=C['panel'], width=310)
@@ -308,11 +309,18 @@ class ReceiptApp:
         lp.columnconfigure(0, weight=1)
         lp.columnconfigure(1, weight=0)
 
-        # 제목
-        tk.Label(lp, text="영수증 목록", bg=C['panel'], fg=C['text'],
-                 font=('맑은 고딕', 11, 'bold')
-                 ).grid(row=0, column=0, columnspan=2, sticky='w',
-                        padx=10, pady=(10, 2))
+        # 제목 + 파일 열기 버튼
+        hdr0 = tk.Frame(lp, bg=C['panel'])
+        hdr0.grid(row=0, column=0, columnspan=2, sticky='ew',
+                  padx=10, pady=(10, 2))
+        tk.Label(hdr0, text="영수증 목록", bg=C['panel'], fg=C['text'],
+                 font=('맑은 고딕', 11, 'bold')).pack(side=tk.LEFT)
+        tk.Button(hdr0, text="📂 파일 열기", command=self._open_file,
+                  bg=C['accent'], fg='#1e1e2e', relief=tk.FLAT,
+                  padx=8, pady=3, font=('맑은 고딕', 9, 'bold'),
+                  activebackground=C['button'], activeforeground=C['text'],
+                  cursor='hand2', bd=0,
+                  ).pack(side=tk.RIGHT)
 
         # 요약 바 (건수 + 합계금액)
         summary_frame = tk.Frame(lp, bg=C['surface'])
