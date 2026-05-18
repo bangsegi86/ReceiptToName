@@ -1809,6 +1809,7 @@ class ReceiptApp:
 
     # ── 날짜 파싱 ─────────────────────────────
     def _parse_date(self, text: str) -> str:
+        # 4자리 연도 패턴
         for pat in [
             r'(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})',
             r'\b(\d{4})(\d{2})(\d{2})\b',
@@ -1817,6 +1818,17 @@ class ReceiptApp:
                 y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 if 2000 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31:
                     return f"{y:04d}{mo:02d}{d:02d}"
+
+        # 2자리 연도 패턴 (예: 25-02-28, 25/02/28, 25.02.28)
+        for pat in [
+            r'\b(\d{2})\s*[-./]\s*(\d{1,2})\s*[-./]\s*(\d{1,2})\b',
+        ]:
+            for m in re.finditer(pat, text):
+                yy, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                y = 2000 + yy
+                if 2000 <= y <= 2099 and 1 <= mo <= 12 and 1 <= d <= 31:
+                    return f"{y:04d}{mo:02d}{d:02d}"
+
         return ''
 
     # ── 금액 파싱 ─────────────────────────────
