@@ -130,10 +130,9 @@ class ReceiptApp:
                              activebackground=C['button'], activeforeground=C['text'],
                              cursor='hand2', bd=0)
 
-        btn(bf, "📂  파일 열기",  self._open_file,        C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        btn(bf, "📂  파일 열기",  self._open_file,   C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
         btn(bf, "✨  자동 보정",  self._auto_correct).pack(side=tk.LEFT, padx=2)
         btn(bf, "✏️  수동 조정",  self._toggle_manual).pack(side=tk.LEFT, padx=2)
-        btn(bf, "▶  보정 적용",  self._apply_correction).pack(side=tk.LEFT, padx=2)
 
         # 파일 이동 버튼
         tk.Frame(bf, bg=C['panel'], width=12).pack(side=tk.LEFT)
@@ -668,54 +667,36 @@ class ReceiptApp:
 
     # ── 날짜 파싱 ─────────────────────────────
     def _parse_date(self, text: str) -> str:
+        # OCR이 공백·점·슬래시·하이픈 등을 섞어 출력할 수 있어 \s* 허용
         for pat, split in [
-            (r'(\d{4})[-./년][ ]?(\d{1,2})[-./월][ ]?(\d{1,2})', True),
-            (r'\b(\d{8})\b', False),
+            (r'(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})', True),
+            (r'\b(\d{4})(\d{2})(\d{2})\b', True),   # YYYYMMDD 붙은 형식
         ]:
             for m in re.finditer(pat, text):
-                if split:
-                    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
-                else:
-                    s = m.group(1)
-                    y, mo, d = int(s[:4]), int(s[4:6]), int(s[6:])
+                y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 if 2000 <= y <= 2100 and 1 <= mo <= 12 and 1 <= d <= 31:
                     return f"{y:04d}{mo:02d}{d:02d}"
         return ''
 
     # ── 금액 파싱 ─────────────────────────────
     def _parse_amount(self, text: str) -> str:
-        keywords = [
-            '합계', '총액', '결제금액', '총계', '합 계',
-            '결제 금액', '청구금액', '실결제', '실 결제',
-            '총구매액', '구매액', '실제금액', '실 제 금 액',
-            '결 제 금 액', '총 구 매 액',
-            'TOTAL', 'Total', '소계',
-        ]
-        lines = text.splitlines()
+        # 1순위: 콤마로 구분된 통화 형식 숫자 중 최댓값
+        #   예) 6,300 / 1,800 / 12,000
+        currency = []
+        for m in re.finditer(r'\d{1,3}(?:,\d{3})+', text):
+            v = int(m.group().replace(',', ''))
+            if 100 <= v <= 50_000_000:
+                currency.append(v)
+        if currency:
+            return str(max(currency))
 
-        # 키워드가 있는 줄 근처에서 가장 큰 수 추출
-        for i, line in enumerate(lines):
-            if any(kw in line for kw in keywords):
-                block = ' '.join(lines[i:i + 3])
-                nums  = []
-                for n in re.findall(r'[\d,]+', block):
-                    s = n.replace(',', '')
-                    if s.isdigit():
-                        v = int(s)
-                        if 100 <= v <= 50_000_000:
-                            nums.append(v)
-                if nums:
-                    return str(max(nums))
-
-        # 폴백: 전체 텍스트에서 가장 큰 수 (승인번호 같은 큰 수 제외)
-        candidates = []
-        for n in re.findall(r'[\d,]+', text):
-            s = n.replace(',', '')
-            if s.isdigit() and len(s) <= 7:   # 7자리 이하만 (최대 9,999,999원)
-                v = int(s)
-                if 100 <= v <= 9_999_999:
-                    candidates.append(v)
-        return str(max(candidates)) if candidates else ''
+        # 2순위(폴백): 콤마 없는 숫자 중 3~7자리 최댓값 (승인번호 제외)
+        plain = []
+        for m in re.finditer(r'\b(\d{3,7})\b', text):
+            v = int(m.group())
+            if 100 <= v <= 9_999_999:
+                plain.append(v)
+        return str(max(plain)) if plain else ''
 
     # ──────────────────────────────────────────
     # 저장
