@@ -48,7 +48,7 @@ C = {
     'canvas_bg': '#181825',
 }
 CORNER_COLORS = ['#f38ba8', '#fab387', '#a6e3a1', '#89b4fa']
-IMG_MARGIN    = 40   # 캔버스 이미지 여백(px)
+IMG_MARGIN    = 40
 
 
 class ReceiptApp:
@@ -58,7 +58,6 @@ class ReceiptApp:
         self._build_ui()
         self._bind_events()
 
-        # 이미지 상태
         self.orig_img:   np.ndarray | None = None
         self.orig_path:  str | None        = None
         self.warped_img: np.ndarray | None = None
@@ -70,11 +69,15 @@ class ReceiptApp:
         self._tk_main:   ImageTk.PhotoImage | None = None
         self._tk_prev:   ImageTk.PhotoImage | None = None
 
-        # 다중 파일 대기열
-        self.file_queue: list[str] = []
-        self.queue_idx:  int       = 0
+        self.file_queue:   list[str]  = []
+        self.queue_idx:    int        = 0
+        self.receipt_data: list[dict] = []
+        self._loading:     bool       = False
 
-        # Tesseract 경로 (빌드 시 번들되거나 시스템 설치)
+        # 목록 ↔ 우측 패널 동기화 트레이스
+        self.date_var.trace_add('write',   self._on_field_change)
+        self.amount_var.trace_add('write', self._on_field_change)
+
         self._tess_cmd:  str | None = None
         self._tess_data: str | None = None
         self._init_tesseract()
@@ -83,26 +86,53 @@ class ReceiptApp:
     def _build_root(self):
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
         self.root.title("영수증 보정 프로그램")
-        self.root.geometry("1280x820")
-        self.root.minsize(950, 620)
         self.root.configure(bg=C['bg'])
+
+        # ttk 다크 테마 (Treeview 포함)
+        style = ttk.Style(self.root)
+        style.theme_use('clam')
+        style.configure('Treeview',
+            background=C['surface'],
+            fieldbackground=C['surface'],
+            foreground=C['text'],
+            rowheight=26,
+            font=('맑은 고딕', 9),
+            borderwidth=0,
+        )
+        style.configure('Treeview.Heading',
+            background=C['button'],
+            foreground=C['subtext'],
+            font=('맑은 고딕', 9, 'bold'),
+            relief='flat',
+            padding=4,
+        )
+        style.map('Treeview',
+            background=[('selected', C['accent'])],
+            foreground=[('selected', '#1e1e2e')],
+        )
+
+        self.root.geometry("1560x820")
+        self.root.minsize(1100, 620)
         self.root.update_idletasks()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        self.root.geometry(f"1280x820+{(sw-1280)//2}+{(sh-820)//2}")
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        self.root.geometry(f"1560x820+{(sw-1560)//2}+{(sh-820)//2}")
 
     # ── UI ────────────────────────────────────
     def _build_ui(self):
-        self.root.columnconfigure(0, weight=3)
-        self.root.columnconfigure(1, weight=0)
+        self.root.columnconfigure(0, weight=0, minsize=270)  # 목록 패널
+        self.root.columnconfigure(1, weight=3)               # 이미지 캔버스
+        self.root.columnconfigure(2, weight=0)               # 우측 패널
         self.root.rowconfigure(0, weight=1)
 
-        # ─ 좌측 패널 ─
+        self._build_list_panel()
+
+        # ─ 이미지 보정 패널 ─
         left = tk.Frame(self.root, bg=C['panel'])
-        left.grid(row=0, column=0, sticky='nsew', padx=(8, 4), pady=8)
+        left.grid(row=0, column=1, sticky='nsew', padx=4, pady=8)
         left.rowconfigure(1, weight=1)
         left.columnconfigure(0, weight=1)
 
-        # 좌측 헤더 (타이틀 + 파일 카운터 + 수동모드 표시)
         hdr = tk.Frame(left, bg=C['panel'])
         hdr.grid(row=0, column=0, sticky='ew', padx=10, pady=(10, 4))
 
@@ -117,7 +147,6 @@ class ReceiptApp:
                                  font=('맑은 고딕', 9))
         self.mode_lbl.pack(side=tk.LEFT)
 
-        # 이미지 캔버스
         cf = tk.Frame(left, bg=C['canvas_bg'])
         cf.grid(row=1, column=0, sticky='nsew', padx=10, pady=4)
         cf.rowconfigure(0, weight=1)
@@ -130,7 +159,6 @@ class ReceiptApp:
             text="이미지를 드래그 앤 드롭하거나\n아래 [파일 열기] 버튼을 클릭하세요",
             fill='#585b70', font=('맑은 고딕', 15), tags='hint', anchor='center')
 
-        # 좌측 버튼 행
         bf = tk.Frame(left, bg=C['panel'])
         bf.grid(row=2, column=0, sticky='ew', padx=10, pady=(4, 10))
 
@@ -145,7 +173,6 @@ class ReceiptApp:
         btn(bf, "✨  자동 보정",  self._auto_correct).pack(side=tk.LEFT, padx=2)
         btn(bf, "✏️  수동 조정",  self._toggle_manual).pack(side=tk.LEFT, padx=2)
 
-        # 파일 이동 버튼
         tk.Frame(bf, bg=C['panel'], width=12).pack(side=tk.LEFT)
         self.prev_btn = btn(bf, "◀ 이전", self._prev_file)
         self.prev_btn.pack(side=tk.LEFT, padx=2)
@@ -154,7 +181,7 @@ class ReceiptApp:
 
         # ─ 우측 패널 ─
         right = tk.Frame(self.root, bg=C['panel'], width=370)
-        right.grid(row=0, column=1, sticky='nsew', padx=(4, 8), pady=8)
+        right.grid(row=0, column=2, sticky='nsew', padx=(4, 8), pady=8)
         right.pack_propagate(False)
         right.columnconfigure(0, weight=1)
 
@@ -175,7 +202,6 @@ class ReceiptApp:
         ttk.Separator(right).grid(row=row, column=0, sticky='ew', padx=12, pady=6)
         row += 1
 
-        # OCR 섹션
         ocr_hdr = tk.Frame(right, bg=C['panel'])
         ocr_hdr.grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 4))
         tk.Label(ocr_hdr, text="텍스트 인식 (OCR)", bg=C['panel'], fg=C['subtext'],
@@ -213,7 +239,6 @@ class ReceiptApp:
         ttk.Separator(right).grid(row=row, column=0, sticky='ew', padx=12, pady=6)
         row += 1
 
-        # 날짜 입력
         tk.Label(right, text="결제 일자", bg=C['panel'], fg=C['subtext'],
                  font=('맑은 고딕', 9, 'bold')).grid(row=row, column=0,
                                                       sticky='w', padx=12, pady=(4, 0))
@@ -229,7 +254,6 @@ class ReceiptApp:
                  ).grid(row=row, column=0, sticky='w', padx=12)
         row += 1
 
-        # 금액 입력
         tk.Label(right, text="합계 금액", bg=C['panel'], fg=C['subtext'],
                  font=('맑은 고딕', 9, 'bold')).grid(row=row, column=0,
                                                       sticky='w', padx=12, pady=(8, 0))
@@ -261,6 +285,44 @@ class ReceiptApp:
             C['surface'], C['subtext']
             ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 12))
 
+    # ── 영수증 목록 패널 ──────────────────────
+    def _build_list_panel(self):
+        lp = tk.Frame(self.root, bg=C['panel'])
+        lp.grid(row=0, column=0, sticky='nsew', padx=(8, 4), pady=8)
+        lp.rowconfigure(1, weight=1)
+        lp.columnconfigure(0, weight=1)
+        lp.columnconfigure(1, weight=0)
+
+        tk.Label(lp, text="영수증 목록", bg=C['panel'], fg=C['text'],
+                 font=('맑은 고딕', 11, 'bold')
+                 ).grid(row=0, column=0, columnspan=2, sticky='w',
+                        padx=10, pady=(10, 6))
+
+        cols = ('file', 'date', 'amount')
+        self.receipt_tree = ttk.Treeview(lp, columns=cols, show='headings',
+                                          selectmode='browse')
+        self.receipt_tree.heading('file',   text='파일명')
+        self.receipt_tree.heading('date',   text='결제일자')
+        self.receipt_tree.heading('amount', text='합계금액')
+        self.receipt_tree.column('file',   width=105, minwidth=60, stretch=True)
+        self.receipt_tree.column('date',   width=78,  minwidth=70, stretch=False, anchor='center')
+        self.receipt_tree.column('amount', width=72,  minwidth=55, stretch=False, anchor='e')
+
+        # 인식 상태별 색상
+        self.receipt_tree.tag_configure('done',    foreground=C['green'])   # 날짜+금액 모두
+        self.receipt_tree.tag_configure('partial', foreground=C['yellow'])  # 하나만
+        self.receipt_tree.tag_configure('none',    foreground=C['red'])     # 미인식
+        self.receipt_tree.tag_configure('saved',   foreground=C['dim'])     # 저장 완료
+
+        vsb = ttk.Scrollbar(lp, orient='vertical', command=self.receipt_tree.yview)
+        self.receipt_tree.configure(yscrollcommand=vsb.set)
+
+        self.receipt_tree.grid(row=1, column=0, sticky='nsew',
+                               padx=(8, 0), pady=(0, 8))
+        vsb.grid(row=1, column=1, sticky='ns', padx=(0, 8), pady=(0, 8))
+
+        self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
+
     # ── 이벤트 바인딩 ─────────────────────────
     def _bind_events(self):
         self.canvas.bind('<ButtonPress-1>',   self._on_click)
@@ -274,6 +336,91 @@ class ReceiptApp:
                 w.dnd_bind('<<Drop>>', self._on_dnd)
 
     # ──────────────────────────────────────────
+    # 목록 데이터 관리
+    # ──────────────────────────────────────────
+    def _init_receipt_data(self, paths: list):
+        self.receipt_data = [
+            {'date': '', 'amount': '', 'ocr_done': False, 'saved': False}
+            for _ in paths
+        ]
+        self._refresh_list()
+
+    def _refresh_list(self):
+        self.receipt_tree.delete(*self.receipt_tree.get_children())
+        for i, (path, data) in enumerate(zip(self.file_queue, self.receipt_data)):
+            fname = Path(path).name
+            if len(fname) > 15:
+                fname = fname[:12] + '...'
+            date_disp   = data['date'] if data['date'] else '-'
+            amount_disp = self._fmt_amount(data['amount'])
+            tag = self._row_tag(data)
+            self.receipt_tree.insert('', 'end', iid=str(i),
+                                     values=(fname, date_disp, amount_disp),
+                                     tags=(tag,))
+        self._select_list_row(self.queue_idx)
+
+    def _update_list_row(self, idx: int):
+        if idx >= len(self.receipt_data) or idx >= len(self.file_queue):
+            return
+        data  = self.receipt_data[idx]
+        fname = Path(self.file_queue[idx]).name
+        if len(fname) > 15:
+            fname = fname[:12] + '...'
+        date_disp   = data['date'] if data['date'] else '-'
+        amount_disp = self._fmt_amount(data['amount'])
+        tag = self._row_tag(data)
+        try:
+            self.receipt_tree.item(str(idx),
+                                   values=(fname, date_disp, amount_disp),
+                                   tags=(tag,))
+        except tk.TclError:
+            pass
+
+    def _fmt_amount(self, amount: str) -> str:
+        if not amount:
+            return '-'
+        try:
+            return f"{int(amount):,}"
+        except ValueError:
+            return amount
+
+    def _row_tag(self, data: dict) -> str:
+        if data.get('saved'):
+            return 'saved'
+        has_date   = bool(data['date'])
+        has_amount = bool(data['amount'])
+        if has_date and has_amount:
+            return 'done'
+        if has_date or has_amount:
+            return 'partial'
+        return 'none'
+
+    def _select_list_row(self, idx: int):
+        iid = str(idx)
+        if self.receipt_tree.exists(iid):
+            self.receipt_tree.selection_set(iid)
+            self.receipt_tree.see(iid)
+
+    def _on_list_select(self, _event):
+        sel = self.receipt_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx != self.queue_idx:
+            self.queue_idx = idx
+            self._load_current()
+
+    def _on_field_change(self, *_):
+        if self._loading:
+            return
+        if not self.receipt_data or self.queue_idx >= len(self.receipt_data):
+            return
+        data = self.receipt_data[self.queue_idx]
+        data['date']   = self.date_var.get()
+        data['amount'] = self.amount_var.get()
+        self._update_list_row(self.queue_idx)
+
+    # ──────────────────────────────────────────
     # 파일 로드
     # ──────────────────────────────────────────
     def _on_dnd(self, event):
@@ -285,6 +432,7 @@ class ReceiptApp:
         if valid:
             self.file_queue = valid
             self.queue_idx  = 0
+            self._init_receipt_data(valid)
             self._load_current()
 
     def _open_file(self):
@@ -298,6 +446,7 @@ class ReceiptApp:
         if paths:
             self.file_queue = list(paths)
             self.queue_idx  = 0
+            self._init_receipt_data(list(paths))
             self._load_current()
 
     def _load_current(self):
@@ -319,21 +468,40 @@ class ReceiptApp:
         self.corners    = []
         self.mode       = 'view'
         self.mode_lbl.configure(text="")
-        self.date_var.set("")
-        self.amount_var.set("")
-        self.ocr_text.delete('1.0', tk.END)
-        self.ocr_status_var.set("대기 중")
-        self.canvas.itemconfigure('hint', state='hidden')
 
+        # OCR UI 초기화 (이전 파일의 진행 상태 제거)
+        self.ocr_progress.stop()
+        self.ocr_progress.grid_remove()
+        self.ocr_btn.configure(state=tk.NORMAL)
+
+        self._loading = True
+        rd = self.receipt_data[self.queue_idx] if self.queue_idx < len(self.receipt_data) else None
+        if rd and rd['ocr_done']:
+            # 이미 OCR 완료된 파일 → 저장된 값 복원
+            self.date_var.set(rd['date'])
+            self.amount_var.set(rd['amount'])
+            self.ocr_status_var.set("OCR 완료 (캐시)")
+        else:
+            self.date_var.set("")
+            self.amount_var.set("")
+            self.ocr_status_var.set("대기 중")
+        self.ocr_text.delete('1.0', tk.END)
+        self._loading = False
+
+        self.canvas.itemconfigure('hint', state='hidden')
         self._update_nav_ui()
+        self._select_list_row(self.queue_idx)
         self._refresh_canvas()
         self._auto_correct()
+
+        # OCR 미실행 파일이면 자동 실행
+        if rd and not rd['ocr_done']:
+            self.root.after(250, self._run_ocr_auto)
 
     def _update_nav_ui(self):
         n = len(self.file_queue)
         if n > 1:
-            self.queue_lbl.configure(
-                text=f"파일 {self.queue_idx + 1} / {n}")
+            self.queue_lbl.configure(text=f"파일 {self.queue_idx + 1} / {n}")
         else:
             self.queue_lbl.configure(text="")
 
@@ -366,7 +534,6 @@ class ReceiptApp:
         ch = self.canvas.winfo_height() or 550
         h, w = self.orig_img.shape[:2]
 
-        # ← IMG_MARGIN 만큼 여백 확보
         eff_w = max(cw - IMG_MARGIN * 2, 100)
         eff_h = max(ch - IMG_MARGIN * 2, 100)
         scale = min(eff_w / w, eff_h / h, 1.0)
@@ -459,10 +626,10 @@ class ReceiptApp:
         s   = arr.sum(axis=1)
         d   = np.diff(arr, axis=1).flatten()
         out = np.zeros((4, 2), dtype=np.float32)
-        out[0] = arr[np.argmin(s)]    # 좌상 (TL)
-        out[1] = arr[np.argmin(d)]    # 우상 (TR)
-        out[2] = arr[np.argmax(s)]    # 우하 (BR)
-        out[3] = arr[np.argmax(d)]    # 좌하 (BL)
+        out[0] = arr[np.argmin(s)]
+        out[1] = arr[np.argmin(d)]
+        out[2] = arr[np.argmax(s)]
+        out[3] = arr[np.argmax(d)]
         return out.tolist()
 
     # ──────────────────────────────────────────
@@ -476,12 +643,11 @@ class ReceiptApp:
             self.mode_lbl.configure(text="")
         else:
             self.mode = 'manual'
-            # 자동 감지된 꼭짓점 유지 — 드래그로 위치만 조정
             self.mode_lbl.configure(
                 text="[수동] 꼭짓점 드래그로 조정  ·  4개 미만이면 빈 곳 클릭으로 추가")
 
     # ──────────────────────────────────────────
-    # 원근 변환 적용 (방향 불일치 시 꼭짓점 재정렬)
+    # 원근 변환 적용
     # ──────────────────────────────────────────
     def _apply_correction(self):
         if self.orig_img is None or len(self.corners) != 4:
@@ -497,8 +663,6 @@ class ReceiptApp:
         src   = np.float32(self.corners)
         out_w, out_h = _dims(src)
 
-        # 원본이 세로인데 결과가 가로로 나오면 → corners[1]↔corners[3] 교환
-        # (잘못된 꼭짓점 순서를 변환 전에 보정해 회전 왜곡 방지)
         oh, ow = self.orig_img.shape[:2]
         orig_portrait  = oh > ow * 1.2
         orig_landscape = ow > oh * 1.2
@@ -535,7 +699,6 @@ class ReceiptApp:
         if self.orig_img is None:
             return
 
-        # 모드 무관하게: 꼭짓점 근처(18px) 클릭 → 드래그 시작
         self.drag_idx = None
         for i, pt in enumerate(self.corners):
             cx, cy = self._i2c(pt)
@@ -543,7 +706,6 @@ class ReceiptApp:
                 self.drag_idx = i
                 return
 
-        # 수동 모드 전용: 꼭짓점 없는 곳 클릭 → 4개 미만일 때만 추가
         if self.mode == 'manual':
             ix, iy = self._c2i(event.x, event.y)
             h, w   = self.orig_img.shape[:2]
@@ -572,11 +734,22 @@ class ReceiptApp:
     # ──────────────────────────────────────────
     # OCR
     # ──────────────────────────────────────────
-    def _run_ocr(self):
+    def _run_ocr_auto(self):
+        """파일 전환 시 자동 실행 - 이미 진행 중이면 스킵."""
+        if self.ocr_btn['state'] == tk.DISABLED:
+            return
+        self._run_ocr(auto=True)
+
+    def _run_ocr(self, auto=False):
         target = self.warped_img if self.warped_img is not None else self.orig_img
         if target is None:
-            messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
+            if not auto:
+                messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
             return
+
+        target_idx = self.queue_idx
+        img_copy   = target.copy()
+
         self.ocr_btn.configure(state=tk.DISABLED)
         self.ocr_status_var.set("OCR 실행 중…")
         self.ocr_progress.grid()
@@ -584,33 +757,50 @@ class ReceiptApp:
         self.root.update()
 
         def worker():
-            text = self._do_ocr(target)
-            self.root.after(0, lambda: self._ocr_done(text))
+            text = self._do_ocr(img_copy)
+            self.root.after(0, lambda: self._ocr_done(text, target_idx))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _ocr_done(self, text: str):
+    def _ocr_done(self, text: str, target_idx: int):
+        date = amount = ''
+        if text:
+            date   = self._parse_date(text)
+            amount = self._parse_amount(text)
+
+        # receipt_data 항상 업데이트 (화면과 무관)
+        if 0 <= target_idx < len(self.receipt_data):
+            rd = self.receipt_data[target_idx]
+            rd['ocr_done'] = True
+            if date:   rd['date']   = date
+            if amount: rd['amount'] = amount
+            self._update_list_row(target_idx)
+
+        # UI는 현재 보고 있는 파일일 때만 갱신
+        if target_idx != self.queue_idx:
+            return
+
         self.ocr_progress.stop()
         self.ocr_progress.grid_remove()
         self.ocr_btn.configure(state=tk.NORMAL)
+
         if not text:
             self.ocr_status_var.set("OCR 실패 — 직접 입력해 주세요")
             return
+
         self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식)")
         self.ocr_text.delete('1.0', tk.END)
         self.ocr_text.insert(tk.END, text)
-        date   = self._parse_date(text)
-        amount = self._parse_amount(text)
-        if date:
-            self.date_var.set(date)
-        if amount:
-            self.amount_var.set(amount)
+
+        self._loading = True
+        if date:   self.date_var.set(date)
+        if amount: self.amount_var.set(amount)
+        self._loading = False
 
     # ── Tesseract 경로 탐색 ───────────────────
     def _init_tesseract(self):
         import shutil
 
-        # 1. PyInstaller 번들 내부
         if getattr(sys, 'frozen', False):
             base = sys._MEIPASS
             exe  = os.path.join(base, 'tesseract.exe')
@@ -620,7 +810,6 @@ class ReceiptApp:
                 self._tess_data = data if os.path.exists(data) else None
                 return
 
-        # 2. exe 옆 tesseract/ 폴더 (포터블 배포 시)
         exe_dir   = Path(sys.argv[0]).resolve().parent
         local_exe = exe_dir / 'tesseract' / 'tesseract.exe'
         if local_exe.exists():
@@ -629,7 +818,6 @@ class ReceiptApp:
             self._tess_data = str(local_data) if local_data.exists() else None
             return
 
-        # 3. 시스템 PATH
         tess = shutil.which('tesseract')
         if tess:
             self._tess_cmd  = tess
@@ -637,7 +825,6 @@ class ReceiptApp:
             self._tess_data = data if os.path.exists(data) else None
             return
 
-        # 4. 일반적인 Windows 설치 경로
         for cand in [
             r'C:\Program Files\Tesseract-OCR\tesseract.exe',
             r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
@@ -648,51 +835,43 @@ class ReceiptApp:
                 self._tess_data = data if os.path.exists(data) else None
                 return
 
-    # ── OCR 전처리 (화질 보정) ────────────────
+    # ── OCR 전처리 ────────────────────────────
     def _preprocess_for_ocr(self, img: np.ndarray) -> np.ndarray:
-        # 그레이스케일
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) \
                if len(img.shape) == 3 else img.copy()
 
-        # 업스케일 (Tesseract 권장 300 DPI 이상 확보)
         h, w = gray.shape
         if h < 1800:
             scale = 1800 / h
             gray = cv2.resize(gray, None, fx=scale, fy=scale,
                               interpolation=cv2.INTER_CUBIC)
 
-        # 노이즈 제거
         gray = cv2.fastNlMeansDenoising(gray, h=15,
                                         templateWindowSize=7,
                                         searchWindowSize=21)
 
-        # CLAHE 대비 강화 (불균일 조명 보정)
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         gray  = clahe.apply(gray)
 
-        # 샤프닝
         kernel = np.array([[-1, -1, -1],
                            [-1,  9, -1],
                            [-1, -1, -1]])
         gray = cv2.filter2D(gray, -1, kernel)
         gray = np.clip(gray, 0, 255).astype(np.uint8)
 
-        # 적응형 이진화
         return cv2.adaptiveThreshold(
             gray, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY, 13, 4,
         )
 
-    # ── OCR 엔진 선택 (Tesseract → Windows 폴백) ──
+    # ── OCR 엔진 선택 ─────────────────────────
     def _do_ocr(self, img: np.ndarray) -> str:
-        # Tesseract 우선
         if HAS_TESSERACT and self._tess_cmd:
             text = self._tesseract_ocr(img)
             if text.strip():
                 return text
 
-        # Windows 내장 OCR 폴백
         fd, tmp = tempfile.mkstemp(suffix='.png')
         os.close(fd)
         try:
@@ -706,19 +885,17 @@ class ReceiptApp:
             except OSError:
                 pass
 
-    # ── Tesseract OCR ────────────────────────
+    # ── Tesseract OCR ─────────────────────────
     def _tesseract_ocr(self, img: np.ndarray) -> str:
         try:
             pytesseract.pytesseract.tesseract_cmd = self._tess_cmd
 
             processed = self._preprocess_for_ocr(img)
 
-            # tessdata 경로 지정
             config = '--oem 1 --psm 4'
             if self._tess_data:
                 config += f' --tessdata-dir "{self._tess_data}"'
 
-            # 한국어 + 영어 (숫자 인식 포함)
             lang = 'kor+eng'
             if self._tess_data and \
                not os.path.exists(os.path.join(self._tess_data, 'kor.traineddata')):
@@ -732,14 +909,8 @@ class ReceiptApp:
 
     # ── Windows 내장 OCR (폴백) ───────────────
     def _windows_ocr(self, img_path: str) -> str:
-        """
-        stdout 대신 임시 파일에 결과를 저장하는 방식으로
-        한글 Windows CP949 인코딩 문제를 근본 해결.
-        PowerShell이 UTF-8(BOM 없음)로 파일에 기록 → Python이 읽음.
-        """
         abs_img  = os.path.abspath(img_path).replace('/', '\\')
 
-        # 결과를 받을 임시 텍스트 파일
         fd, txt_path = tempfile.mkstemp(suffix='.txt')
         os.close(fd)
         abs_txt = txt_path.replace('/', '\\')
@@ -775,7 +946,6 @@ class ReceiptApp:
             "  $engine=[Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang)}\n"
             "if(-not $engine){exit 1}\n"
             "$r=Await($engine.RecognizeAsync($bitmap))([Windows.Media.Ocr.OcrResult])\n"
-            # stdout 대신 파일 기록 (BOM 없는 UTF-8)
             "[System.IO.File]::WriteAllText($txtPath,$r.Text,"
             "  [System.Text.UTF8Encoding]::new($false))\n"
         )
@@ -801,10 +971,9 @@ class ReceiptApp:
 
     # ── 날짜 파싱 ─────────────────────────────
     def _parse_date(self, text: str) -> str:
-        # OCR이 공백·점·슬래시·하이픈 등을 섞어 출력할 수 있어 \s* 허용
-        for pat, split in [
-            (r'(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})', True),
-            (r'\b(\d{4})(\d{2})(\d{2})\b', True),   # YYYYMMDD 붙은 형식
+        for pat in [
+            r'(\d{4})\s*[-./년]\s*(\d{1,2})\s*[-./월]\s*(\d{1,2})',
+            r'\b(\d{4})(\d{2})(\d{2})\b',
         ]:
             for m in re.finditer(pat, text):
                 y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
@@ -814,8 +983,6 @@ class ReceiptApp:
 
     # ── 금액 파싱 ─────────────────────────────
     def _parse_amount(self, text: str) -> str:
-        # 1순위: 콤마로 구분된 통화 형식 숫자 중 최댓값
-        #   예) 6,300 / 1,800 / 12,000
         currency = []
         for m in re.finditer(r'\d{1,3}(?:,\d{3})+', text):
             v = int(m.group().replace(',', ''))
@@ -824,7 +991,6 @@ class ReceiptApp:
         if currency:
             return str(max(currency))
 
-        # 2순위(폴백): 콤마 없는 숫자 중 3~7자리 최댓값 (승인번호 제외)
         plain = []
         for m in re.finditer(r'\b(\d{3,7})\b', text):
             v = int(m.group())
@@ -884,7 +1050,11 @@ class ReceiptApp:
             messagebox.showerror("저장 오류", f"저장 실패\n{e}")
             return
 
-        # 저장 완료 알림 후 다음 파일로 자동 이동
+        # 목록에 저장 완료 표시
+        if self.queue_idx < len(self.receipt_data):
+            self.receipt_data[self.queue_idx]['saved'] = True
+            self._update_list_row(self.queue_idx)
+
         remaining = len(self.file_queue) - self.queue_idx - 1
         msg = f"저장 완료!\n\n파일명: {out_path.name}"
         if remaining > 0:
