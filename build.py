@@ -116,6 +116,8 @@ def main():
         "Pillow",
         "pytesseract",
         "tkinterdnd2",
+        "paddlepaddle",
+        "paddleocr",
         "pyinstaller",
         "--upgrade", "--quiet",
     ])
@@ -164,6 +166,9 @@ def main():
         "--hidden-import", "tkinter.messagebox",
         "--collect-all", "tkinterdnd2",
         "--collect-all", "cv2",
+        "--collect-all", "paddleocr",
+        "--collect-all", "paddle",
+        "--hidden-import", "paddleocr",
     ]
     for b in add_binary:
         cmd += ["--add-binary", b]
