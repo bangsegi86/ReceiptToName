@@ -73,6 +73,7 @@ class ReceiptApp:
         self.queue_idx:    int        = 0
         self.receipt_data: list[dict] = []
         self._loading:     bool       = False
+        self._active_col:  int        = 1   # 1=결제일자, 2=합계금액
 
         # 목록 ↔ 우측 패널 동기화 트레이스
         self.date_var.trace_add('write',   self._on_field_change)
@@ -379,6 +380,8 @@ class ReceiptApp:
 
         self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
         self.receipt_tree.bind('<Double-Button-1>',  self._on_tree_double_click)
+        self.receipt_tree.bind('<ButtonPress-1>',    self._on_tree_single_click)
+        self.receipt_tree.bind('<KeyPress>',         self._on_tree_key)
 
     # ── 이벤트 바인딩 ─────────────────────────
     def _bind_events(self):
@@ -407,20 +410,83 @@ class ReceiptApp:
         self.summary_amount_var.set(
             f"합계  {amount_sum:,}원" if amount_sum else "합계  0원")
 
+    def _on_tree_single_click(self, event):
+        """단일 클릭으로 활성 컬럼 추적."""
+        col = self.receipt_tree.identify_column(event.x)
+        if col:
+            col_idx = int(col[1:]) - 1
+            if col_idx in (1, 2):
+                self._active_col = col_idx
+
     def _on_tree_double_click(self, event):
         region = self.receipt_tree.identify_region(event.x, event.y)
         if region != 'cell':
             return
-        col  = self.receipt_tree.identify_column(event.x)  # '#1' '#2' '#3'
-        item = self.receipt_tree.identify_row(event.y)
+        col     = self.receipt_tree.identify_column(event.x)
+        item    = self.receipt_tree.identify_row(event.y)
         if not item:
             return
-        col_idx = int(col[1:]) - 1   # 0=파일명, 1=결제일자, 2=합계금액
-        if col_idx == 0:              # 파일명은 편집 불가
+        col_idx = int(col[1:]) - 1
+        if col_idx == 0:
             return
-        self._start_cell_edit(item, col, col_idx)
+        self._active_col = col_idx
+        self._start_cell_edit(item, col_idx)
 
-    def _start_cell_edit(self, item: str, col: str, col_idx: int):
+    def _on_tree_key(self, event):
+        """키보드로 셀 편집 시작 (엑셀 스타일)."""
+        item = self.receipt_tree.focus()
+        if not item:
+            return
+
+        ks = event.keysym
+
+        # F2 → 기존 값 유지하며 편집
+        if ks == 'F2':
+            self._edit_focused_cell()
+            return 'break'
+
+        # Enter → 편집 시작
+        if ks == 'Return':
+            self._edit_focused_cell()
+            return 'break'
+
+        # Tab → 활성 컬럼 전환 (편집 시작 없이)
+        if ks == 'Tab':
+            self._active_col = 2 if self._active_col == 1 else 1
+            return 'break'
+
+        # Delete / BackSpace → 셀 내용 지우기
+        if ks in ('Delete', 'BackSpace'):
+            data_idx = int(item)
+            if data_idx < len(self.receipt_data):
+                field = 'date' if self._active_col == 1 else 'amount'
+                self.receipt_data[data_idx][field] = ''
+                self._update_list_row(data_idx)
+                self._update_summary()
+                if data_idx == self.queue_idx:
+                    self._loading = True
+                    if field == 'date':   self.date_var.set('')
+                    else:                 self.amount_var.set('')
+                    self._loading = False
+            return 'break'
+
+        # 인쇄 가능한 문자 → 내용 교체하며 편집 시작
+        if event.char and event.char.isprintable() and ks not in (
+            'Up', 'Down', 'Left', 'Right', 'Prior', 'Next',
+            'Home', 'End', 'Escape',
+        ):
+            self._edit_focused_cell(replace=True, initial=event.char)
+            return 'break'
+
+    def _edit_focused_cell(self, replace: bool = False, initial: str = ''):
+        item = self.receipt_tree.focus()
+        if not item:
+            return
+        self._start_cell_edit(item, self._active_col, replace=replace, initial=initial)
+
+    def _start_cell_edit(self, item: str, col_idx: int,
+                         replace: bool = False, initial: str = ''):
+        col  = f'#{col_idx + 1}'
         bbox = self.receipt_tree.bbox(item, col)
         if not bbox:
             return
@@ -431,22 +497,29 @@ class ReceiptApp:
         rd    = self.receipt_data[data_idx]
         field = 'date' if col_idx == 1 else 'amount'
 
-        var   = tk.StringVar(value=rd[field])
-        entry = tk.Entry(self.receipt_tree, textvariable=var,
-                         bg=C['accent'], fg='#1e1e2e',
-                         font=('맑은 고딕', 9), relief=tk.FLAT, bd=2,
-                         insertbackground='#1e1e2e', justify='center')
+        init_val = initial if replace else rd[field]
+        var      = tk.StringVar(value=init_val)
+        entry    = tk.Entry(self.receipt_tree, textvariable=var,
+                            bg=C['accent'], fg='#1e1e2e',
+                            font=('맑은 고딕', 9), relief=tk.FLAT, bd=2,
+                            insertbackground='#1e1e2e', justify='center')
         entry.place(x=x, y=y, width=w, height=h)
         entry.focus_set()
-        entry.select_range(0, tk.END)
+        entry.icursor(tk.END)
+        if not replace:
+            entry.select_range(0, tk.END)
 
-        def commit(_=None):
+        committed = [False]
+
+        def _do_commit():
+            if committed[0]:
+                return
+            committed[0] = True
             new_val = re.sub(r'[^\d]', '', var.get().strip())
             rd[field]      = new_val
             rd['ocr_done'] = True
             self._update_list_row(data_idx)
             self._update_summary()
-            # 현재 화면 파일이면 우측 패널도 동기화
             if data_idx == self.queue_idx:
                 self._loading = True
                 if field == 'date':   self.date_var.set(new_val)
@@ -457,10 +530,62 @@ class ReceiptApp:
             except tk.TclError:
                 pass
 
-        entry.bind('<Return>',   commit)
-        entry.bind('<Tab>',      commit)
-        entry.bind('<FocusOut>', commit)
-        entry.bind('<Escape>',   lambda _: entry.destroy())
+        def on_enter(_=None):
+            _do_commit()
+            # 다음 행 같은 컬럼으로 이동
+            nxt = self.receipt_tree.next(item)
+            if nxt:
+                self.receipt_tree.selection_set(nxt)
+                self.receipt_tree.focus(nxt)
+                self.receipt_tree.see(nxt)
+                idx = int(nxt)
+                if idx != self.queue_idx:
+                    self.queue_idx = idx
+                    self._load_current()
+                self.root.after(20, self._edit_focused_cell)
+            return 'break'
+
+        def on_tab(_=None):
+            _do_commit()
+            # 같은 행 반대 컬럼으로 이동
+            self._active_col = 2 if col_idx == 1 else 1
+            self.root.after(20, self._edit_focused_cell)
+            return 'break'
+
+        def on_up(_=None):
+            _do_commit()
+            prv = self.receipt_tree.prev(item)
+            if prv:
+                self.receipt_tree.selection_set(prv)
+                self.receipt_tree.focus(prv)
+                self.receipt_tree.see(prv)
+                idx = int(prv)
+                if idx != self.queue_idx:
+                    self.queue_idx = idx
+                    self._load_current()
+                self.root.after(20, self._edit_focused_cell)
+            return 'break'
+
+        def on_down(_=None):
+            _do_commit()
+            nxt = self.receipt_tree.next(item)
+            if nxt:
+                self.receipt_tree.selection_set(nxt)
+                self.receipt_tree.focus(nxt)
+                self.receipt_tree.see(nxt)
+                idx = int(nxt)
+                if idx != self.queue_idx:
+                    self.queue_idx = idx
+                    self._load_current()
+                self.root.after(20, self._edit_focused_cell)
+            return 'break'
+
+        entry.bind('<Return>',    on_enter)
+        entry.bind('<Tab>',       on_tab)
+        entry.bind('<Up>',        on_up)
+        entry.bind('<Down>',      on_down)
+        entry.bind('<FocusOut>',  lambda _: _do_commit())
+        entry.bind('<Escape>',    lambda _: entry.destroy())
 
     # ──────────────────────────────────────────
     # 목록 데이터 관리
