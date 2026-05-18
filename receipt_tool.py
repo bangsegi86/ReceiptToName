@@ -193,6 +193,11 @@ class ReceiptApp:
                  ).grid(row=row, column=0, sticky='w', padx=12)
         row += 1
 
+        self.ocr_progress = ttk.Progressbar(right, mode='indeterminate')
+        self.ocr_progress.grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 4))
+        self.ocr_progress.grid_remove()
+        row += 1
+
         tf = tk.Frame(right, bg=C['panel'])
         tf.grid(row=row, column=0, sticky='nsew', padx=12, pady=(2, 6))
         right.rowconfigure(row, weight=1)
@@ -574,6 +579,8 @@ class ReceiptApp:
             return
         self.ocr_btn.configure(state=tk.DISABLED)
         self.ocr_status_var.set("OCR 실행 중…")
+        self.ocr_progress.grid()
+        self.ocr_progress.start(10)
         self.root.update()
 
         def worker():
@@ -583,6 +590,8 @@ class ReceiptApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _ocr_done(self, text: str):
+        self.ocr_progress.stop()
+        self.ocr_progress.grid_remove()
         self.ocr_btn.configure(state=tk.NORMAL)
         if not text:
             self.ocr_status_var.set("OCR 실패 — 직접 입력해 주세요")
@@ -776,6 +785,7 @@ class ReceiptApp:
                 ['powershell', '-ExecutionPolicy', 'Bypass',
                  '-NoProfile', '-NonInteractive', '-Command', ps],
                 capture_output=True, timeout=45,
+                creationflags=subprocess.CREATE_NO_WINDOW,
             )
             if proc.returncode == 0 and os.path.getsize(txt_path) > 0:
                 with open(txt_path, 'r', encoding='utf-8') as f:
