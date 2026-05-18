@@ -287,7 +287,7 @@ class ReceiptApp:
     def _build_list_panel(self):
         lp = tk.Frame(self.root, bg=C['panel'])
         lp.grid(row=0, column=0, sticky='nsew', padx=(8, 4), pady=8)
-        lp.rowconfigure(2, weight=1)   # Treeview 행만 늘어남
+        lp.rowconfigure(3, weight=1)   # Treeview 행만 늘어남
         lp.columnconfigure(0, weight=1)
         lp.columnconfigure(1, weight=0)
 
@@ -297,9 +297,27 @@ class ReceiptApp:
                  ).grid(row=0, column=0, columnspan=2, sticky='w',
                         padx=10, pady=(10, 2))
 
+        # 요약 바 (건수 + 합계금액)
+        summary_frame = tk.Frame(lp, bg=C['surface'])
+        summary_frame.grid(row=1, column=0, columnspan=2, sticky='ew',
+                           padx=8, pady=(0, 4))
+        summary_frame.columnconfigure(0, weight=1)
+        summary_frame.columnconfigure(1, weight=1)
+
+        self.summary_count_var  = tk.StringVar(value="총  0건")
+        self.summary_amount_var = tk.StringVar(value="합계  0원")
+        tk.Label(summary_frame, textvariable=self.summary_count_var,
+                 bg=C['surface'], fg=C['accent'],
+                 font=('맑은 고딕', 9, 'bold'), anchor='w', padx=8, pady=4
+                 ).grid(row=0, column=0, sticky='ew')
+        tk.Label(summary_frame, textvariable=self.summary_amount_var,
+                 bg=C['surface'], fg=C['yellow'],
+                 font=('맑은 고딕', 9, 'bold'), anchor='e', padx=8, pady=4
+                 ).grid(row=0, column=1, sticky='ew')
+
         # 색상 범례
         legend = tk.Frame(lp, bg=C['panel'])
-        legend.grid(row=1, column=0, columnspan=2, sticky='w', padx=10, pady=(0, 6))
+        legend.grid(row=2, column=0, columnspan=2, sticky='w', padx=10, pady=(2, 4))
         for color, label in [
             (C['green'],  '날짜+금액'),
             (C['yellow'], '하나만'),
@@ -330,9 +348,9 @@ class ReceiptApp:
         vsb = ttk.Scrollbar(lp, orient='vertical', command=self.receipt_tree.yview)
         self.receipt_tree.configure(yscrollcommand=vsb.set)
 
-        self.receipt_tree.grid(row=2, column=0, sticky='nsew',
+        self.receipt_tree.grid(row=3, column=0, sticky='nsew',
                                padx=(8, 0), pady=(0, 0))
-        vsb.grid(row=2, column=1, sticky='ns', padx=(0, 8), pady=(0, 0))
+        vsb.grid(row=3, column=1, sticky='ns', padx=(0, 8), pady=(0, 0))
 
         # 선택 항목 OCR 실행 버튼
         self.batch_ocr_btn = tk.Button(
@@ -343,9 +361,9 @@ class ReceiptApp:
             activebackground=C['button'], activeforeground=C['text'],
             cursor='hand2', bd=0,
         )
-        self.batch_ocr_btn.grid(row=3, column=0, columnspan=2,
+        self.batch_ocr_btn.grid(row=4, column=0, columnspan=2,
                                 sticky='ew', padx=8, pady=(6, 2))
-        lp.rowconfigure(3, weight=0)
+        lp.rowconfigure(4, weight=0)
 
         self.batch_save_btn = tk.Button(
             lp, text="✅  선택 항목 저장",
@@ -355,11 +373,12 @@ class ReceiptApp:
             activebackground=C['green'], activeforeground='#1e1e2e',
             cursor='hand2', bd=0,
         )
-        self.batch_save_btn.grid(row=4, column=0, columnspan=2,
+        self.batch_save_btn.grid(row=5, column=0, columnspan=2,
                                  sticky='ew', padx=8, pady=(2, 8))
-        lp.rowconfigure(4, weight=0)
+        lp.rowconfigure(5, weight=0)
 
         self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
+        self.receipt_tree.bind('<Double-Button-1>',  self._on_tree_double_click)
 
     # ── 이벤트 바인딩 ─────────────────────────
     def _bind_events(self):
@@ -374,6 +393,76 @@ class ReceiptApp:
                 w.dnd_bind('<<Drop>>', self._on_dnd)
 
     # ──────────────────────────────────────────
+    # 목록 요약 및 인라인 편집
+    # ──────────────────────────────────────────
+    def _update_summary(self):
+        total = len(self.file_queue)
+        amount_sum = 0
+        for rd in self.receipt_data:
+            try:
+                amount_sum += int(rd['amount']) if rd['amount'] else 0
+            except ValueError:
+                pass
+        self.summary_count_var.set(f"총  {total}건")
+        self.summary_amount_var.set(
+            f"합계  {amount_sum:,}원" if amount_sum else "합계  0원")
+
+    def _on_tree_double_click(self, event):
+        region = self.receipt_tree.identify_region(event.x, event.y)
+        if region != 'cell':
+            return
+        col  = self.receipt_tree.identify_column(event.x)  # '#1' '#2' '#3'
+        item = self.receipt_tree.identify_row(event.y)
+        if not item:
+            return
+        col_idx = int(col[1:]) - 1   # 0=파일명, 1=결제일자, 2=합계금액
+        if col_idx == 0:              # 파일명은 편집 불가
+            return
+        self._start_cell_edit(item, col, col_idx)
+
+    def _start_cell_edit(self, item: str, col: str, col_idx: int):
+        bbox = self.receipt_tree.bbox(item, col)
+        if not bbox:
+            return
+        x, y, w, h = bbox
+        data_idx = int(item)
+        if data_idx >= len(self.receipt_data):
+            return
+        rd    = self.receipt_data[data_idx]
+        field = 'date' if col_idx == 1 else 'amount'
+
+        var   = tk.StringVar(value=rd[field])
+        entry = tk.Entry(self.receipt_tree, textvariable=var,
+                         bg=C['accent'], fg='#1e1e2e',
+                         font=('맑은 고딕', 9), relief=tk.FLAT, bd=2,
+                         insertbackground='#1e1e2e', justify='center')
+        entry.place(x=x, y=y, width=w, height=h)
+        entry.focus_set()
+        entry.select_range(0, tk.END)
+
+        def commit(_=None):
+            new_val = re.sub(r'[^\d]', '', var.get().strip())
+            rd[field]      = new_val
+            rd['ocr_done'] = True
+            self._update_list_row(data_idx)
+            self._update_summary()
+            # 현재 화면 파일이면 우측 패널도 동기화
+            if data_idx == self.queue_idx:
+                self._loading = True
+                if field == 'date':   self.date_var.set(new_val)
+                if field == 'amount': self.amount_var.set(new_val)
+                self._loading = False
+            try:
+                entry.destroy()
+            except tk.TclError:
+                pass
+
+        entry.bind('<Return>',   commit)
+        entry.bind('<Tab>',      commit)
+        entry.bind('<FocusOut>', commit)
+        entry.bind('<Escape>',   lambda _: entry.destroy())
+
+    # ──────────────────────────────────────────
     # 목록 데이터 관리
     # ──────────────────────────────────────────
     def _init_receipt_data(self, paths: list):
@@ -382,6 +471,7 @@ class ReceiptApp:
             for _ in paths
         ]
         self._refresh_list()
+        self._update_summary()
 
     def _refresh_list(self):
         self.receipt_tree.delete(*self.receipt_tree.get_children())
@@ -458,6 +548,7 @@ class ReceiptApp:
         data['date']   = self.date_var.get()
         data['amount'] = self.amount_var.get()
         self._update_list_row(self.queue_idx)
+        self._update_summary()
 
     # ──────────────────────────────────────────
     # 파일 로드
@@ -873,6 +964,7 @@ class ReceiptApp:
             if amount: self.amount_var.set(amount)
             self._loading = False
 
+        self._update_summary()
         self._ocr_done_n += 1
         self.batch_ocr_btn.configure(
             text=f"OCR 실행 중… ({self._ocr_done_n}/{self._ocr_total})")
@@ -994,6 +1086,7 @@ class ReceiptApp:
         if 0 <= idx < len(self.receipt_data):
             self.receipt_data[idx]['saved'] = True
             self._update_list_row(idx)
+            self._update_summary()
 
     def _batch_save_done(self, saved: int, errors: list):
         self.batch_save_btn.configure(state=tk.NORMAL, text="✅  선택 항목 저장")
