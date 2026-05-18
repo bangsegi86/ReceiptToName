@@ -26,6 +26,12 @@ try:
 except ImportError:
     HAS_DND = False
 
+try:
+    import pytesseract
+    HAS_TESSERACT = True
+except ImportError:
+    HAS_TESSERACT = False
+
 
 C = {
     'bg':        '#1e1e2e',
@@ -67,6 +73,11 @@ class ReceiptApp:
         # 다중 파일 대기열
         self.file_queue: list[str] = []
         self.queue_idx:  int       = 0
+
+        # Tesseract 경로 (빌드 시 번들되거나 시스템 설치)
+        self._tess_cmd:  str | None = None
+        self._tess_data: str | None = None
+        self._init_tesseract()
 
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
@@ -566,18 +577,7 @@ class ReceiptApp:
         self.root.update()
 
         def worker():
-            fd, tmp = tempfile.mkstemp(suffix='.png')
-            os.close(fd)
-            try:
-                ok, buf = cv2.imencode('.png', target)
-                if ok:
-                    buf.tofile(tmp)
-                text = self._windows_ocr(tmp)
-            finally:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+            text = self._do_ocr(target)
             self.root.after(0, lambda: self._ocr_done(text))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -597,7 +597,131 @@ class ReceiptApp:
         if amount:
             self.amount_var.set(amount)
 
-    # ── Windows 내장 OCR ─────────────────────
+    # ── Tesseract 경로 탐색 ───────────────────
+    def _init_tesseract(self):
+        import shutil
+
+        # 1. PyInstaller 번들 내부
+        if getattr(sys, 'frozen', False):
+            base = sys._MEIPASS
+            exe  = os.path.join(base, 'tesseract.exe')
+            data = os.path.join(base, 'tessdata')
+            if os.path.exists(exe):
+                self._tess_cmd  = exe
+                self._tess_data = data if os.path.exists(data) else None
+                return
+
+        # 2. exe 옆 tesseract/ 폴더 (포터블 배포 시)
+        exe_dir   = Path(sys.argv[0]).resolve().parent
+        local_exe = exe_dir / 'tesseract' / 'tesseract.exe'
+        if local_exe.exists():
+            self._tess_cmd  = str(local_exe)
+            local_data = exe_dir / 'tesseract' / 'tessdata'
+            self._tess_data = str(local_data) if local_data.exists() else None
+            return
+
+        # 3. 시스템 PATH
+        tess = shutil.which('tesseract')
+        if tess:
+            self._tess_cmd  = tess
+            data = os.path.join(os.path.dirname(tess), 'tessdata')
+            self._tess_data = data if os.path.exists(data) else None
+            return
+
+        # 4. 일반적인 Windows 설치 경로
+        for cand in [
+            r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+            r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        ]:
+            if os.path.exists(cand):
+                self._tess_cmd  = cand
+                data = os.path.join(os.path.dirname(cand), 'tessdata')
+                self._tess_data = data if os.path.exists(data) else None
+                return
+
+    # ── OCR 전처리 (화질 보정) ────────────────
+    def _preprocess_for_ocr(self, img: np.ndarray) -> np.ndarray:
+        # 그레이스케일
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) \
+               if len(img.shape) == 3 else img.copy()
+
+        # 업스케일 (Tesseract 권장 300 DPI 이상 확보)
+        h, w = gray.shape
+        if h < 1800:
+            scale = 1800 / h
+            gray = cv2.resize(gray, None, fx=scale, fy=scale,
+                              interpolation=cv2.INTER_CUBIC)
+
+        # 노이즈 제거
+        gray = cv2.fastNlMeansDenoising(gray, h=15,
+                                        templateWindowSize=7,
+                                        searchWindowSize=21)
+
+        # CLAHE 대비 강화 (불균일 조명 보정)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        gray  = clahe.apply(gray)
+
+        # 샤프닝
+        kernel = np.array([[-1, -1, -1],
+                           [-1,  9, -1],
+                           [-1, -1, -1]])
+        gray = cv2.filter2D(gray, -1, kernel)
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
+
+        # 적응형 이진화
+        return cv2.adaptiveThreshold(
+            gray, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 13, 4,
+        )
+
+    # ── OCR 엔진 선택 (Tesseract → Windows 폴백) ──
+    def _do_ocr(self, img: np.ndarray) -> str:
+        # Tesseract 우선
+        if HAS_TESSERACT and self._tess_cmd:
+            text = self._tesseract_ocr(img)
+            if text.strip():
+                return text
+
+        # Windows 내장 OCR 폴백
+        fd, tmp = tempfile.mkstemp(suffix='.png')
+        os.close(fd)
+        try:
+            ok, buf = cv2.imencode('.png', img)
+            if ok:
+                buf.tofile(tmp)
+            return self._windows_ocr(tmp)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    # ── Tesseract OCR ────────────────────────
+    def _tesseract_ocr(self, img: np.ndarray) -> str:
+        try:
+            pytesseract.pytesseract.tesseract_cmd = self._tess_cmd
+
+            processed = self._preprocess_for_ocr(img)
+
+            # tessdata 경로 지정
+            config = '--oem 1 --psm 4'
+            if self._tess_data:
+                config += f' --tessdata-dir "{self._tess_data}"'
+
+            # 한국어 + 영어 (숫자 인식 포함)
+            lang = 'kor+eng'
+            if self._tess_data and \
+               not os.path.exists(os.path.join(self._tess_data, 'kor.traineddata')):
+                lang = 'eng'
+
+            return pytesseract.image_to_string(
+                Image.fromarray(processed), lang=lang, config=config
+            ).strip()
+        except Exception:
+            return ''
+
+    # ── Windows 내장 OCR (폴백) ───────────────
     def _windows_ocr(self, img_path: str) -> str:
         """
         stdout 대신 임시 파일에 결과를 저장하는 방식으로
