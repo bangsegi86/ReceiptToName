@@ -1033,61 +1033,82 @@ class ReceiptApp:
     def _detect_receipt(self, img):
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        min_area = w * h * 0.05
+        max_area = w * h * 0.97   # 전체 이미지 크기면 실패로 간주
 
-        # ① CLAHE로 대비 강화
+        def try_4poly(cnt):
+            peri = cv2.arcLength(cnt, True)
+            for eps in (0.01, 0.02, 0.03, 0.05, 0.08, 0.12):
+                ap = cv2.approxPolyDP(cnt, eps * peri, True)
+                if len(ap) == 4:
+                    return self._order_pts(
+                        ap.reshape(4, 2).astype(float).tolist())
+            return None
+
+        def minarearect(cnt):
+            rect = cv2.minAreaRect(cnt)
+            box = cv2.boxPoints(rect)
+            return self._order_pts(box.astype(float).tolist())
+
+        # ── 1단계: 엣지 기반 (CLAHE + Canny) ──────────────
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        # 다양한 엣지 맵 시도
-        candidates = []
-        for blur_k in (5, 9):
+        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+        for blur_k in (5, 9, 15):
             blurred = cv2.GaussianBlur(enhanced, (blur_k, blur_k), 0)
-            for lo, hi in [(20, 80), (30, 120), (50, 150), (80, 200)]:
-                candidates.append(cv2.Canny(blurred, lo, hi))
+            for lo, hi in [(10, 50), (20, 80), (30, 120), (50, 150)]:
+                edges  = cv2.Canny(blurred, lo, hi)
+                closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k)
+                cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in sorted(cnts, key=cv2.contourArea, reverse=True)[:5]:
+                    area = cv2.contourArea(cnt)
+                    if not (min_area <= area <= max_area):
+                        continue
+                    result = try_4poly(cnt)
+                    if result:
+                        return result
 
-        # ② 적응형 이진화 기반 엣지도 추가
-        blurred = cv2.GaussianBlur(enhanced, (9, 9), 0)
-        thresh = cv2.adaptiveThreshold(blurred, 255,
-                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                       cv2.THRESH_BINARY_INV, 21, 10)
-        candidates.append(thresh)
+        # ── 2단계: 밝기 기반 세그멘테이션 ─────────────────
+        # 영수증 용지(밝음)와 배경을 분리
+        blurred = cv2.GaussianBlur(gray, (21, 21), 0)
+        morph_k = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
 
-        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+        thresh_list = [None, 210, 190, 170, 150, 130]
+        for tv in thresh_list:
+            if tv is None:
+                _, mask = cv2.threshold(blurred, 0, 255,
+                                        cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            else:
+                _, mask = cv2.threshold(blurred, tv, 255, cv2.THRESH_BINARY)
 
-        for edge_map in candidates:
-            closed = cv2.morphologyEx(edge_map, cv2.MORPH_CLOSE, close_kernel)
-            cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, morph_k)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  morph_k)
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
-            cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
-            for cnt in cnts[:5]:
-                if cv2.contourArea(cnt) < w * h * 0.05:
-                    continue
-                peri = cv2.arcLength(cnt, True)
-                # ③ epsilon 범위를 넓게 시도
-                for eps in (0.01, 0.02, 0.03, 0.05, 0.08):
-                    approx = cv2.approxPolyDP(cnt, eps * peri, True)
-                    if len(approx) == 4:
-                        pts = approx.reshape(4, 2).astype(float).tolist()
-                        return self._order_pts(pts)
+            if not cnts:
+                continue
+            cnt = max(cnts, key=cv2.contourArea)
+            area = cv2.contourArea(cnt)
+            if not (min_area <= area <= max_area):
+                continue
+            result = try_4poly(cnt)
+            if result:
+                return result
+            # 4각형 근사 실패 시 최소 면적 사각형으로 폴백
+            return minarearect(cnt)
 
-        # ④ 폴백: 가장 큰 윤곽선의 볼록 껍질에서 극단 4점 추출
-        all_cnts = []
-        for edge_map in candidates:
-            closed = cv2.morphologyEx(edge_map, cv2.MORPH_CLOSE, close_kernel)
-            cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-            all_cnts.extend(cnts)
-        if all_cnts:
-            biggest = max(all_cnts, key=cv2.contourArea)
-            if cv2.contourArea(biggest) > w * h * 0.05:
-                hull = cv2.convexHull(biggest).reshape(-1, 2).astype(float)
-                # 극단 4점 (좌상·우상·우하·좌하)
-                s, d = hull.sum(1), np.diff(hull, axis=1).flatten()
-                pts = [hull[np.argmin(s)].tolist(),
-                       hull[np.argmin(d)].tolist(),
-                       hull[np.argmax(s)].tolist(),
-                       hull[np.argmax(d)].tolist()]
-                return self._order_pts(pts)
+        # ── 3단계: 최소 면적 사각형 최종 폴백 ─────────────
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+        edges   = cv2.Canny(blurred, 20, 80)
+        closed  = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k)
+        cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        if cnts:
+            cnt = max(cnts, key=cv2.contourArea)
+            if min_area <= cv2.contourArea(cnt) <= max_area:
+                return minarearect(cnt)
 
         return None
 
