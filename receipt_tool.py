@@ -32,11 +32,13 @@ try:
 except ImportError:
     HAS_TESSERACT = False
 
+_PADDLE_IMPORT_ERROR = None
 try:
     from paddleocr import PaddleOCR
     HAS_PADDLE = True
-except ImportError:
+except Exception as _e:
     HAS_PADDLE = False
+    _PADDLE_IMPORT_ERROR = str(_e)
 
 
 C = {
@@ -91,10 +93,14 @@ class ReceiptApp:
 
         self._paddle:           object | None = None
         self._paddle_ready:     bool          = False
-        self._paddle_error:     str | None    = None
+        self._paddle_error:     str | None    = _PADDLE_IMPORT_ERROR
         self._paddle_init_lock: threading.Lock = threading.Lock()
         if HAS_PADDLE:
             threading.Thread(target=self._paddle_init_bg, daemon=True).start()
+        elif _PADDLE_IMPORT_ERROR:
+            err_short = _PADDLE_IMPORT_ERROR[:100]
+            self.root.after(200, lambda: self.ocr_status_var.set(
+                f"PaddleOCR 로드 실패 → Tesseract 사용\n오류: {err_short}"))
 
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
