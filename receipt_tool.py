@@ -1032,9 +1032,20 @@ class ReceiptApp:
 
     def _detect_receipt(self, img):
         h, w = img.shape[:2]
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        min_area = w * h * 0.05
-        max_area = w * h * 0.97   # 전체 이미지 크기면 실패로 간주
+
+        # 영수증이 프레임 끝에 붙으면 윤곽선이 잘려 감지 실패
+        # → 검은 테두리 패딩으로 항상 닫힌 윤곽선 보장
+        PAD = max(20, int(min(h, w) * 0.02))
+        padded = cv2.copyMakeBorder(img, PAD, PAD, PAD, PAD,
+                                    cv2.BORDER_CONSTANT, value=[0, 0, 0])
+        ph, pw = padded.shape[:2]
+        gray = cv2.cvtColor(padded, cv2.COLOR_BGR2GRAY)
+
+        min_area = pw * ph * 0.04
+        max_area = pw * ph * 0.98
+
+        def unpad(pts):
+            return [[x - PAD, y - PAD] for x, y in pts]
 
         def try_4poly(cnt):
             peri = cv2.arcLength(cnt, True)
@@ -1042,13 +1053,13 @@ class ReceiptApp:
                 ap = cv2.approxPolyDP(cnt, eps * peri, True)
                 if len(ap) == 4:
                     return self._order_pts(
-                        ap.reshape(4, 2).astype(float).tolist())
+                        unpad(ap.reshape(4, 2).astype(float).tolist()))
             return None
 
         def minarearect(cnt):
             rect = cv2.minAreaRect(cnt)
             box = cv2.boxPoints(rect)
-            return self._order_pts(box.astype(float).tolist())
+            return self._order_pts(unpad(box.astype(float).tolist()))
 
         # ── 1단계: 엣지 기반 (CLAHE + Canny) ──────────────
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -1071,12 +1082,10 @@ class ReceiptApp:
                         return result
 
         # ── 2단계: 밝기 기반 세그멘테이션 ─────────────────
-        # 영수증 용지(밝음)와 배경을 분리
         blurred = cv2.GaussianBlur(gray, (21, 21), 0)
         morph_k = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
 
-        thresh_list = [None, 210, 190, 170, 150, 130]
-        for tv in thresh_list:
+        for tv in [None, 210, 190, 170, 150, 130]:
             if tv is None:
                 _, mask = cv2.threshold(blurred, 0, 255,
                                         cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -1096,10 +1105,9 @@ class ReceiptApp:
             result = try_4poly(cnt)
             if result:
                 return result
-            # 4각형 근사 실패 시 최소 면적 사각형으로 폴백
             return minarearect(cnt)
 
-        # ── 3단계: 최소 면적 사각형 최종 폴백 ─────────────
+        # ── 3단계: minAreaRect 최종 폴백 ───────────────────
         blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
         edges   = cv2.Canny(blurred, 20, 80)
         closed  = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k)
