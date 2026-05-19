@@ -1035,36 +1035,7 @@ class ReceiptApp:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         min_area = w * h * 0.04
 
-        # ── 이미지 4모서리에서 배경 색 측정 ──────────────
-        s = max(15, int(min(h, w) * 0.04))
-        corner_px = np.concatenate([
-            gray[:s, :s].ravel(), gray[:s, -s:].ravel(),
-            gray[-s:, :s].ravel(), gray[-s:, -s:].ravel(),
-        ])
-        bg_med = float(np.median(corner_px))
-
-        # ── 초강력 블러: 글자/줄 완전히 제거 ─────────────
-        # 커널이 홀수여야 하므로 이미지 크기에 맞게 조정
-        ksize = min(101, (min(h, w) // 10) | 1)   # 항상 홀수
-        big_blur = cv2.GaussianBlur(gray, (ksize, ksize), 0)
-
-        morph_k = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
-
-        # ── 배경/영수증 분리 (여러 여유값 시도) ───────────
-        if bg_med < 128:                          # 어두운 배경
-            margins = [max(30, (255 - bg_med) * 0.25),
-                       max(20, (255 - bg_med) * 0.15),
-                       max(15, (255 - bg_med) * 0.10),
-                       40, 25]
-            flag = cv2.THRESH_BINARY
-        else:                                     # 밝은 배경
-            margins = [max(30, bg_med * 0.25),
-                       max(20, bg_med * 0.15),
-                       max(15, bg_med * 0.10),
-                       40, 25]
-            flag = cv2.THRESH_BINARY_INV
-
-        def _corners_from_cnt(cnt):
+        def cnt_to_corners(cnt):
             peri = cv2.arcLength(cnt, True)
             for eps in (0.02, 0.04, 0.06, 0.08, 0.12):
                 ap = cv2.approxPolyDP(cnt, eps * peri, True)
@@ -1072,41 +1043,54 @@ class ReceiptApp:
                     return self._order_pts(
                         ap.reshape(4, 2).astype(float).tolist())
             rect = cv2.minAreaRect(cnt)
-            box  = cv2.boxPoints(rect)
-            return self._order_pts(box.astype(float).tolist())
+            return self._order_pts(cv2.boxPoints(rect).astype(float).tolist())
 
-        for margin in margins:
-            if flag == cv2.THRESH_BINARY:
-                tv = int(np.clip(bg_med + margin, 1, 254))
+        # 초강력 블러: 글자/선 완전 제거
+        ksize = min(101, (min(h, w) // 8) | 1)
+        blr   = cv2.GaussianBlur(gray, (ksize, ksize), 0)
+
+        # 가장자리 전체 스트립으로 배경 밝기 추정 (4모서리보다 훨씬 안정적)
+        m      = max(10, min(h, w) // 15)
+        edge   = np.concatenate([blr[:m, :].ravel(), blr[-m:, :].ravel(),
+                                 blr[:, :m].ravel(), blr[:, -m:].ravel()])
+        bg_med = float(np.median(edge))
+        bg_std = float(np.std(edge))
+
+        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+
+        # 여러 임계값으로 영수증 덩어리 추출
+        # OPEN 생략 — 영수증 내부 어두운 영역이 쪼개지는 문제 방지
+        is_dark_bg = bg_med < 128
+        for extra in (2.5, 2.0, 1.5, 1.0, 0.5, 0.0):
+            offset = max(15, extra * bg_std + 15)
+            if is_dark_bg:
+                tv   = int(min(bg_med + offset, 240))
+                flag = cv2.THRESH_BINARY
             else:
-                tv = int(np.clip(bg_med - margin, 1, 254))
+                tv   = int(max(bg_med - offset, 15))
+                flag = cv2.THRESH_BINARY_INV
 
-            _, mask = cv2.threshold(big_blur, tv, 255, flag)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, morph_k)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  morph_k)
-
+            _, mask = cv2.threshold(blr, tv, 255, flag)
+            mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
             cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
             if not cnts:
                 continue
-            cnt = max(cnts, key=cv2.contourArea)
-            if cv2.contourArea(cnt) < min_area:
-                continue
-            return _corners_from_cnt(cnt)
+            cnt  = max(cnts, key=cv2.contourArea)
+            area = cv2.contourArea(cnt)
+            if min_area <= area <= w * h * 0.96:
+                return cnt_to_corners(cnt)
 
-        # ── 폴백: Canny 엣지에서 가장 큰 윤곽 ────────────
-        clahe   = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enh     = clahe.apply(gray)
-        blur9   = cv2.GaussianBlur(enh, (9, 9), 0)
-        edges   = cv2.Canny(blur9, 30, 120)
-        close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
-        closed  = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, close_k)
-        cnts, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-        if cnts:
-            cnt = max(cnts, key=cv2.contourArea)
-            if cv2.contourArea(cnt) >= min_area:
-                return _corners_from_cnt(cnt)
+        # Otsu 폴백 (두 방향 모두 시도)
+        _, bw = cv2.threshold(blr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        for mask in (bw, cv2.bitwise_not(bw)):
+            mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+            if cnts:
+                cnt = max(cnts, key=cv2.contourArea)
+                if cv2.contourArea(cnt) >= min_area:
+                    return cnt_to_corners(cnt)
 
         return None
 
