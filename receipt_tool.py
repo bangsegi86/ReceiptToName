@@ -1033,7 +1033,8 @@ class ReceiptApp:
     def _detect_receipt(self, img):
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        min_area = w * h * 0.04
+        min_area = w * h * 0.05
+        max_area = w * h * 0.96
 
         def cnt_to_corners(cnt):
             peri = cv2.arcLength(cnt, True)
@@ -1045,53 +1046,32 @@ class ReceiptApp:
             rect = cv2.minAreaRect(cnt)
             return self._order_pts(cv2.boxPoints(rect).astype(float).tolist())
 
-        # 초강력 블러: 글자/선 완전 제거
+        # 초강력 블러: 글자/선 완전 제거, 종이 덩어리만 남김
         ksize = min(101, (min(h, w) // 8) | 1)
         blr   = cv2.GaussianBlur(gray, (ksize, ksize), 0)
-
-        # 가장자리 전체 스트립으로 배경 밝기 추정 (4모서리보다 훨씬 안정적)
-        m      = max(10, min(h, w) // 15)
-        edge   = np.concatenate([blr[:m, :].ravel(), blr[-m:, :].ravel(),
-                                 blr[:, :m].ravel(), blr[:, -m:].ravel()])
-        bg_med = float(np.median(edge))
-        bg_std = float(np.std(edge))
-
         close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
 
-        # 여러 임계값으로 영수증 덩어리 추출
-        # OPEN 생략 — 영수증 내부 어두운 영역이 쪼개지는 문제 방지
-        is_dark_bg = bg_med < 128
-        for extra in (2.5, 2.0, 1.5, 1.0, 0.5, 0.0):
-            offset = max(15, extra * bg_std + 15)
-            if is_dark_bg:
-                tv   = int(min(bg_med + offset, 240))
-                flag = cv2.THRESH_BINARY
-            else:
-                tv   = int(max(bg_med - offset, 15))
-                flag = cv2.THRESH_BINARY_INV
+        best_cnt  = None
+        best_area = 0
 
-            _, mask = cv2.threshold(blr, tv, 255, flag)
-            mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
-            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-            if not cnts:
-                continue
-            cnt  = max(cnts, key=cv2.contourArea)
-            area = cv2.contourArea(cnt)
-            if min_area <= area <= w * h * 0.96:
-                return cnt_to_corners(cnt)
+        # 모든 임계값 × 밝은방향/어두운방향 시도
+        # → 유효 범위(5~96%) 내에서 가장 큰 윤곽 = 영수증
+        for tv in range(240, 20, -10):
+            for flag in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
+                _, mask = cv2.threshold(blr, tv, 255, flag)
+                mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
+                cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                           cv2.CHAIN_APPROX_SIMPLE)
+                if not cnts:
+                    continue
+                cnt  = max(cnts, key=cv2.contourArea)
+                area = cv2.contourArea(cnt)
+                if min_area <= area <= max_area and area > best_area:
+                    best_cnt  = cnt
+                    best_area = area
 
-        # Otsu 폴백 (두 방향 모두 시도)
-        _, bw = cv2.threshold(blr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        for mask in (bw, cv2.bitwise_not(bw)):
-            mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
-            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                       cv2.CHAIN_APPROX_SIMPLE)
-            if cnts:
-                cnt = max(cnts, key=cv2.contourArea)
-                if cv2.contourArea(cnt) >= min_area:
-                    return cnt_to_corners(cnt)
-
+        if best_cnt is not None:
+            return cnt_to_corners(best_cnt)
         return None
 
     def _order_pts(self, pts):
