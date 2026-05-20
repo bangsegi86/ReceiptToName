@@ -1599,11 +1599,39 @@ class ReceiptApp:
 
     # ── Tesseract 경로 탐색 ───────────────────
 
+    # ── PaddleOCR 전처리 ──────────────────────
+    def _preprocess_for_paddle(self, img: np.ndarray) -> np.ndarray:
+        # [1단계] 사방 50px 흰색 패딩 — 테두리 글자 누락 방지
+        img = cv2.copyMakeBorder(img, 50, 50, 50, 50,
+                                 cv2.BORDER_CONSTANT, value=(255, 255, 255))
+
+        # [3단계] 해상도 정규화 (높이 1800~2000px, 종횡비 유지)
+        h, w = img.shape[:2]
+        if h < 1800:
+            scale = 1800 / h
+            img = cv2.resize(img, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_CUBIC)
+        elif h > 2000:
+            scale = 2000 / h
+            img = cv2.resize(img, None, fx=scale, fy=scale,
+                             interpolation=cv2.INTER_CUBIC)
+
+        # [4단계] 그림자 제거 및 조명 균일화 — BGR 3채널로 반환
+        gray  = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray  = clahe.apply(gray)
+        img   = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+        # [5단계] 미세 노이즈 제거 (3x3 Gaussian blur)
+        img = cv2.GaussianBlur(img, (3, 3), 0)
+
+        return img
+
     # ── PaddleOCR 실행 ────────────────────────
     def _paddle_ocr(self, img: np.ndarray) -> str:
         try:
-            # PaddleOCR는 BGR numpy array를 직접 받음
-            result = self._paddle.ocr(img, cls=True)
+            processed = self._preprocess_for_paddle(img)
+            result = self._paddle.ocr(processed, cls=True)
             lines = []
             if result and result[0]:
                 for line in result[0]:
