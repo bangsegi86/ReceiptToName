@@ -1588,9 +1588,8 @@ class ReceiptApp:
                 return
             try:
                 self._paddle = PaddleOCR(
-                    use_angle_cls=True,
+                    use_textline_orientation=True,
                     lang='korean',
-                    show_log=False,
                 )
                 self._paddle_ready = True
                 self._paddle_error = None
