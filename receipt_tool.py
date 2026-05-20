@@ -1040,7 +1040,7 @@ class ReceiptApp:
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         min_area = w * h * 0.05
-        max_area = w * h * 0.999  # 0.96→0.999: 꽉 찬 영수증도 허용
+        max_area = w * h * 0.96
 
         def cnt_to_corners(cnt):
             peri = cv2.arcLength(cnt, True)
