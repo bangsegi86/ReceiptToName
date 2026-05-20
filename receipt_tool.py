@@ -1040,7 +1040,7 @@ class ReceiptApp:
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         min_area = w * h * 0.05
-        max_area = w * h * 0.96
+        max_area = w * h * 0.999  # 0.96→0.999: 꽉 찬 영수증도 허용
 
         def cnt_to_corners(cnt):
             peri = cv2.arcLength(cnt, True)
@@ -1052,7 +1052,6 @@ class ReceiptApp:
             rect = cv2.minAreaRect(cnt)
             return self._order_pts(cv2.boxPoints(rect).astype(float).tolist())
 
-        # 초강력 블러: 글자/선 완전 제거, 종이 덩어리만 남김
         ksize = min(101, (min(h, w) // 8) | 1)
         blr   = cv2.GaussianBlur(gray, (ksize, ksize), 0)
         close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
@@ -1060,8 +1059,6 @@ class ReceiptApp:
         best_cnt  = None
         best_area = 0
 
-        # 모든 임계값 × 밝은방향/어두운방향 시도
-        # → 유효 범위(5~96%) 내에서 가장 큰 윤곽 = 영수증
         for tv in range(240, 20, -10):
             for flag in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
                 _, mask = cv2.threshold(blr, tv, 255, flag)
@@ -1076,7 +1073,9 @@ class ReceiptApp:
                     best_cnt  = cnt
                     best_area = area
 
-        if best_cnt is not None:
+        # 이미지 면적의 40% 미만인 윤곽 = 영수증 내부 텍스트 덩어리일 가능성 높음
+        # → 영수증이 프레임을 꽉 채운 경우이므로 None 반환 → 호출측에서 전체 이미지 코너 사용
+        if best_cnt is not None and best_area >= w * h * 0.40:
             return cnt_to_corners(best_cnt)
         return None
 
