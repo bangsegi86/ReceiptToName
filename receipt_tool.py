@@ -2165,17 +2165,24 @@ class ReceiptApp:
         with self._paddle_init_lock:
             if self._paddle_ready:
                 return
-            try:
-                self._paddle = PaddleOCR(
-                    use_textline_orientation=True,
-                    lang='korean',
-                )
-                self._paddle_ready = True
-                self._paddle_error = None
-            except Exception as e:
-                self._paddle = None
-                self._paddle_ready = False
-                self._paddle_error = str(e)
+            # 서버급 인식 모델 우선 시도, 파라미터 미지원 시 모바일 모델로 폴백
+            for kwargs in [
+                {'use_textline_orientation': True, 'lang': 'korean',
+                 'rec_model_name': 'korean_PP-OCRv5_server_rec'},
+                {'use_textline_orientation': True, 'lang': 'korean'},
+            ]:
+                try:
+                    self._paddle = PaddleOCR(**kwargs)
+                    self._paddle_ready = True
+                    self._paddle_error = None
+                    return
+                except (ValueError, TypeError):
+                    continue
+                except Exception as e:
+                    self._paddle       = None
+                    self._paddle_ready = False
+                    self._paddle_error = str(e)
+                    return
 
     # ── Tesseract 경로 탐색 ───────────────────
 
