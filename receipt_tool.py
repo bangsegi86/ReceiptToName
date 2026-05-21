@@ -14,7 +14,8 @@ import threading
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import json
 
 import cv2
 import numpy as np
@@ -102,6 +103,21 @@ class ReceiptApp:
             self.root.after(200, lambda: self.ocr_status_var.set(
                 f"PaddleOCR 로드 실패 → Tesseract 사용\n오류: {err_short}"))
 
+        # 이미지 분할 탭 상태
+        self.sp_img:              np.ndarray | None = None
+        self.sp_orig_path:        str | None        = None
+        self.sp_h_lines:          list              = []
+        self.sp_v_lines:          list              = []
+        self.sp_selected_regions: set               = set()
+        self.sp_drag:             tuple | None      = None
+        self.sp_hover:            tuple | None      = None
+        self.sp_selected_line:    tuple | None      = None
+        self.sp_scale:            float             = 1.0
+        self.sp_ox:               int               = 0
+        self.sp_oy:               int               = 0
+        self.sp_presets:          dict              = {}
+        self._sp_tk_img                             = None
+
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
@@ -130,6 +146,13 @@ class ReceiptApp:
             background=[('selected', C['accent'])],
             foreground=[('selected', '#1e1e2e')],
         )
+        style.configure('TNotebook', background=C['bg'], borderwidth=0, tabmargins=0)
+        style.configure('TNotebook.Tab',
+            background=C['button'], foreground=C['subtext'],
+            padding=[16, 8], font=('맑은 고딕', 10))
+        style.map('TNotebook.Tab',
+            background=[('selected', C['accent']), ('active', C['surface'])],
+            foreground=[('selected', '#1e1e2e'), ('active', C['text'])])
 
         self.root.geometry("1560x820")
         self.root.minsize(1100, 620)
@@ -140,15 +163,24 @@ class ReceiptApp:
 
     # ── UI ────────────────────────────────────
     def _build_ui(self):
-        self.root.columnconfigure(0, weight=0, minsize=380)  # 목록 패널
-        self.root.columnconfigure(1, weight=3)               # 이미지 캔버스
-        self.root.columnconfigure(2, weight=0, minsize=310)  # 우측 패널
-        self.root.rowconfigure(0, weight=1)
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill=tk.BOTH, expand=True)
+
+        mt   = tk.Frame(nb, bg=C['bg'])
+        tab2 = tk.Frame(nb, bg=C['bg'])
+        nb.add(mt,   text='  📋 영수증 보정  ')
+        nb.add(tab2, text='  ✂️ 이미지 분할  ')
+        self._main_tab = mt
+
+        mt.columnconfigure(0, weight=0, minsize=380)
+        mt.columnconfigure(1, weight=3)
+        mt.columnconfigure(2, weight=0, minsize=310)
+        mt.rowconfigure(0, weight=1)
 
         self._build_list_panel()
 
         # ─ 이미지 보정 패널 ─
-        left = tk.Frame(self.root, bg=C['panel'])
+        left = tk.Frame(mt, bg=C['panel'])
         left.grid(row=0, column=1, sticky='nsew', padx=4, pady=8)
         left.rowconfigure(1, weight=1)
         left.rowconfigure(2, weight=0, minsize=50)  # 버튼 행 항상 표시
@@ -208,7 +240,7 @@ class ReceiptApp:
         btn(bf, "🗜\n압축 저장",   self._compress_current).pack(side=tk.LEFT, padx=2)
 
         # ─ 우측 패널 ─
-        right = tk.Frame(self.root, bg=C['panel'], width=310)
+        right = tk.Frame(mt, bg=C['panel'], width=310)
         right.grid(row=0, column=2, sticky='nsew', padx=(4, 8), pady=8)
         right.pack_propagate(False)
         right.columnconfigure(0, weight=1)
@@ -308,9 +340,11 @@ class ReceiptApp:
                   cursor='hand2', bd=0
                   ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 12))
 
+        self._build_splitter_tab(tab2)
+
     # ── 영수증 목록 패널 ──────────────────────
     def _build_list_panel(self):
-        lp = tk.Frame(self.root, bg=C['panel'])
+        lp = tk.Frame(self._main_tab, bg=C['panel'])
         lp.grid(row=0, column=0, sticky='nsew', padx=(8, 4), pady=8)
         lp.rowconfigure(3, weight=1)   # Treeview 행만 늘어남
         lp.columnconfigure(0, weight=1)
@@ -439,6 +473,552 @@ class ReceiptApp:
             for w in (self.canvas, self.root):
                 w.drop_target_register(DND_FILES)
                 w.dnd_bind('<<Drop>>', self._on_dnd)
+
+    # ══════════════════════════════════════════
+    # 이미지 분할 탭
+    # ══════════════════════════════════════════
+    def _build_splitter_tab(self, parent):
+        def sbtn(p, text, cmd, bg=C['surface'], fg=C['text']):
+            return tk.Button(p, text=text, command=cmd,
+                             bg=bg, fg=fg, relief=tk.FLAT,
+                             padx=10, pady=5, font=('맑은 고딕', 9),
+                             activebackground=C['button'],
+                             activeforeground=C['text'],
+                             cursor='hand2', bd=0)
+
+        # ── 툴바 ──
+        tb = tk.Frame(parent, bg=C['panel'])
+        tb.pack(fill=tk.X, padx=8, pady=(8, 4))
+
+        sbtn(tb, "📂 불러오기", self._sp_load_file).pack(side=tk.LEFT, padx=2)
+        sbtn(tb, "📋 붙여넣기 (Ctrl+V)", self._sp_paste_image).pack(side=tk.LEFT, padx=2)
+
+        tk.Frame(tb, bg=C['dim'], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=3)
+
+        sbtn(tb, "+ 가로선", self._sp_add_h_line,
+             C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        sbtn(tb, "+ 세로선", self._sp_add_v_line,
+             C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+        sbtn(tb, "선 삭제 (Del)", self._sp_delete_line).pack(side=tk.LEFT, padx=2)
+        sbtn(tb, "전체 초기화",  self._sp_clear_lines).pack(side=tk.LEFT, padx=2)
+
+        tk.Frame(tb, bg=C['dim'], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=3)
+
+        tk.Label(tb, text="즐겨찾기:", bg=C['panel'], fg=C['subtext'],
+                 font=('맑은 고딕', 9)).pack(side=tk.LEFT, padx=(0, 4))
+
+        self.sp_preset_var = tk.StringVar()
+        self.sp_preset_combo = ttk.Combobox(tb, textvariable=self.sp_preset_var,
+                                             width=14, state='readonly',
+                                             font=('맑은 고딕', 9))
+        self.sp_preset_combo.pack(side=tk.LEFT, padx=2)
+
+        sbtn(tb, "저장",    self._sp_save_preset).pack(side=tk.LEFT, padx=2)
+        sbtn(tb, "불러오기", self._sp_apply_preset).pack(side=tk.LEFT, padx=2)
+        sbtn(tb, "삭제",    self._sp_delete_preset).pack(side=tk.LEFT, padx=2)
+
+        # ── 본문 (캔버스 + 영역 패널) ──
+        content = tk.Frame(parent, bg=C['bg'])
+        content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1)
+        content.columnconfigure(1, weight=0)
+
+        cf = tk.Frame(content, bg=C['canvas_bg'])
+        cf.grid(row=0, column=0, sticky='nsew', padx=(0, 4))
+        cf.rowconfigure(0, weight=1)
+        cf.columnconfigure(0, weight=1)
+
+        self.sp_canvas = tk.Canvas(cf, bg=C['canvas_bg'],
+                                   highlightthickness=0, cursor='crosshair')
+        self.sp_canvas.grid(row=0, column=0, sticky='nsew')
+
+        # ── 우측 영역 패널 ──
+        rp = tk.Frame(content, bg=C['panel'], width=250)
+        rp.grid(row=0, column=1, sticky='nsew')
+        rp.pack_propagate(False)
+        rp.rowconfigure(2, weight=1)
+        rp.columnconfigure(0, weight=1)
+
+        tk.Label(rp, text="분할 영역", bg=C['panel'], fg=C['text'],
+                 font=('맑은 고딕', 11, 'bold')
+                 ).grid(row=0, column=0, sticky='w', padx=12, pady=(10, 2))
+        tk.Label(rp, text="클릭하여 선택/해제",
+                 bg=C['panel'], fg=C['dim'], font=('맑은 고딕', 8)
+                 ).grid(row=1, column=0, sticky='w', padx=12)
+
+        rf = tk.Frame(rp, bg=C['panel'])
+        rf.grid(row=2, column=0, sticky='nsew', padx=8, pady=4)
+        rf.rowconfigure(0, weight=1)
+        rf.columnconfigure(0, weight=1)
+
+        self.sp_region_tree = ttk.Treeview(
+            rf, columns=('sel', 'name', 'size'),
+            show='headings', selectmode='none')
+        self.sp_region_tree.heading('sel',  text='선택')
+        self.sp_region_tree.heading('name', text='영역')
+        self.sp_region_tree.heading('size', text='크기(px)')
+        self.sp_region_tree.column('sel',  width=38,  minwidth=38,  stretch=False, anchor='center')
+        self.sp_region_tree.column('name', width=70,  minwidth=60,  stretch=True,  anchor='center')
+        self.sp_region_tree.column('size', width=100, minwidth=80,  stretch=False, anchor='center')
+        self.sp_region_tree.tag_configure('sel_on',  foreground=C['green'])
+        self.sp_region_tree.tag_configure('sel_off', foreground=C['subtext'])
+
+        rvsb = ttk.Scrollbar(rf, orient='vertical',
+                             command=self.sp_region_tree.yview)
+        self.sp_region_tree.configure(yscrollcommand=rvsb.set)
+        self.sp_region_tree.grid(row=0, column=0, sticky='nsew')
+        rvsb.grid(row=0, column=1, sticky='ns')
+
+        bf2 = tk.Frame(rp, bg=C['panel'])
+        bf2.grid(row=3, column=0, sticky='ew', padx=8, pady=4)
+        bf2.columnconfigure(0, weight=1)
+        bf2.columnconfigure(1, weight=1)
+        sbtn(bf2, "전체 선택", self._sp_select_all
+             ).grid(row=0, column=0, sticky='ew', padx=2, pady=2)
+        sbtn(bf2, "선택 해제", self._sp_deselect_all
+             ).grid(row=0, column=1, sticky='ew', padx=2, pady=2)
+
+        sbtn(rp, "💾  선택 영역 저장", self._sp_save_selected,
+             '#40a02b', 'white').grid(row=4, column=0,
+                                     sticky='ew', padx=8, pady=(0, 12))
+
+        # ── 이벤트 ──
+        self.sp_canvas.bind('<Configure>',       lambda _: self._sp_draw())
+        self.sp_canvas.bind('<ButtonPress-1>',   self._sp_on_press)
+        self.sp_canvas.bind('<B1-Motion>',       self._sp_on_drag)
+        self.sp_canvas.bind('<ButtonRelease-1>', self._sp_on_release)
+        self.sp_canvas.bind('<Motion>',          self._sp_on_move)
+        self.sp_canvas.bind('<Leave>',           lambda _: self._sp_on_leave())
+        self.sp_canvas.bind('<Control-v>',       lambda _: self._sp_paste_image())
+        self.sp_canvas.bind('<Control-V>',       lambda _: self._sp_paste_image())
+        self.sp_canvas.bind('<Delete>',          lambda _: self._sp_delete_line())
+        self.sp_region_tree.bind('<ButtonPress-1>', self._sp_on_region_tree_click)
+
+        self._sp_load_presets()
+
+    # ── 분할: 이미지 로드 ──────────────────────
+    def _sp_load_file(self):
+        paths = filedialog.askopenfilenames(
+            title="이미지 선택",
+            filetypes=[("이미지 파일",
+                        "*.jpg *.jpeg *.png *.bmp *.tiff *.tif *.webp"),
+                       ("모든 파일", "*.*")])
+        if paths:
+            raw = np.fromfile(paths[0], dtype=np.uint8)
+            img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+            if img is not None:
+                self._sp_set_image(img, paths[0])
+
+    def _sp_paste_image(self, event=None):
+        try:
+            from PIL import ImageGrab
+            pil_img = ImageGrab.grabclipboard()
+            if pil_img is None:
+                messagebox.showinfo("알림", "클립보드에 이미지가 없습니다.")
+                return
+            arr = np.array(pil_img.convert('RGB'))
+            self._sp_set_image(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR), None)
+        except Exception as e:
+            messagebox.showerror("오류", f"붙여넣기 실패\n{e}")
+
+    def _sp_set_image(self, img, path):
+        self.sp_img         = img
+        self.sp_orig_path   = path
+        self.sp_h_lines     = []
+        self.sp_v_lines     = []
+        self.sp_selected_regions = set()
+        self.sp_drag        = None
+        self.sp_hover       = None
+        self.sp_selected_line = None
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    # ── 분할: 캔버스 그리기 ────────────────────
+    def _sp_draw(self):
+        c  = self.sp_canvas
+        cw = c.winfo_width()
+        ch = c.winfo_height()
+        c.delete('all')
+        if cw <= 1 or ch <= 1:
+            return
+
+        if self.sp_img is None:
+            c.create_text(cw // 2, ch // 2,
+                text="이미지를 불러오거나 Ctrl+V 로 붙여넣으세요",
+                fill='#585b70', font=('맑은 고딕', 13), anchor='center')
+            return
+
+        ih, iw = self.sp_img.shape[:2]
+        scale = min((cw - 20) / iw, (ch - 20) / ih)
+        self.sp_scale = scale
+        dw = int(iw * scale)
+        dh = int(ih * scale)
+        self.sp_ox = (cw - dw) // 2
+        self.sp_oy = (ch - dh) // 2
+
+        img_rgb = cv2.cvtColor(self.sp_img, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb).resize((dw, dh), Image.LANCZOS)
+        self._sp_tk_img = ImageTk.PhotoImage(pil_img)
+        c.create_image(self.sp_ox, self.sp_oy, anchor='nw',
+                       image=self._sp_tk_img)
+
+        h_edges = [0.0] + sorted(self.sp_h_lines) + [1.0]
+        v_edges = [0.0] + sorted(self.sp_v_lines) + [1.0]
+
+        for ri in range(len(h_edges) - 1):
+            for ci in range(len(v_edges) - 1):
+                x0 = self.sp_ox + int(v_edges[ci]   * dw)
+                y0 = self.sp_oy + int(h_edges[ri]   * dh)
+                x1 = self.sp_ox + int(v_edges[ci+1] * dw)
+                y1 = self.sp_oy + int(h_edges[ri+1] * dh)
+                if (ri, ci) in self.sp_selected_regions:
+                    c.create_rectangle(x0, y0, x1, y1,
+                                       outline=C['green'], fill='', width=3)
+                    mx, my = (x0 + x1) // 2, (y0 + y1) // 2
+                    c.create_text(mx, my, text=f"{ri+1}-{ci+1}",
+                                  fill=C['green'],
+                                  font=('맑은 고딕', 10, 'bold'))
+                else:
+                    c.create_rectangle(x0, y0, x1, y1,
+                                       fill='#000000', outline='',
+                                       stipple='gray25')
+
+        LINE_COL_H = C['yellow']
+        LINE_COL_V = C['accent']
+        SEL_COL    = '#f38ba8'
+
+        for i, fy in enumerate(self.sp_h_lines):
+            y = self.sp_oy + int(fy * dh)
+            col = SEL_COL if self.sp_selected_line == ('h', i) \
+                  else LINE_COL_H
+            w_  = 3 if (self.sp_hover == ('h', i) or
+                        self.sp_selected_line == ('h', i)) else 2
+            c.create_line(self.sp_ox, y, self.sp_ox + dw, y,
+                          fill=col, width=w_, dash=(6, 3))
+            hx = self.sp_ox + dw // 2
+            c.create_oval(hx-7, y-7, hx+7, y+7, fill=col, outline='')
+            c.create_text(hx, y, text='↕', fill='#1e1e2e',
+                          font=('맑은 고딕', 8, 'bold'))
+
+        for i, fx in enumerate(self.sp_v_lines):
+            x = self.sp_ox + int(fx * dw)
+            col = SEL_COL if self.sp_selected_line == ('v', i) \
+                  else LINE_COL_V
+            w_  = 3 if (self.sp_hover == ('v', i) or
+                        self.sp_selected_line == ('v', i)) else 2
+            c.create_line(x, self.sp_oy, x, self.sp_oy + dh,
+                          fill=col, width=w_, dash=(6, 3))
+            hy = self.sp_oy + dh // 2
+            c.create_oval(x-7, hy-7, x+7, hy+7, fill=col, outline='')
+            c.create_text(x, hy, text='↔', fill='#1e1e2e',
+                          font=('맑은 고딕', 8, 'bold'))
+
+    # ── 분할: 마우스 히트 테스트 ───────────────
+    def _sp_hit_test(self, x, y):
+        if self.sp_img is None:
+            return None
+        ih, iw = self.sp_img.shape[:2]
+        dw = int(iw * self.sp_scale)
+        dh = int(ih * self.sp_scale)
+        TOL = 8
+        for i, fy in enumerate(self.sp_h_lines):
+            cy = self.sp_oy + int(fy * dh)
+            if abs(y - cy) <= TOL and self.sp_ox <= x <= self.sp_ox + dw:
+                return ('h', i)
+        for i, fx in enumerate(self.sp_v_lines):
+            cx = self.sp_ox + int(fx * dw)
+            if abs(x - cx) <= TOL and self.sp_oy <= y <= self.sp_oy + dh:
+                return ('v', i)
+        return None
+
+    def _sp_region_at(self, x, y):
+        if self.sp_img is None:
+            return None
+        ih, iw = self.sp_img.shape[:2]
+        dw = int(iw * self.sp_scale)
+        dh = int(ih * self.sp_scale)
+        if not (self.sp_ox <= x <= self.sp_ox + dw and
+                self.sp_oy <= y <= self.sp_oy + dh):
+            return None
+        fx = (x - self.sp_ox) / dw
+        fy = (y - self.sp_oy) / dh
+        h_edges = [0.0] + sorted(self.sp_h_lines) + [1.0]
+        v_edges = [0.0] + sorted(self.sp_v_lines) + [1.0]
+        row = next((i for i in range(len(h_edges)-1)
+                    if h_edges[i] <= fy < h_edges[i+1]),
+                   len(h_edges)-2)
+        col = next((i for i in range(len(v_edges)-1)
+                    if v_edges[i] <= fx < v_edges[i+1]),
+                   len(v_edges)-2)
+        return (row, col)
+
+    # ── 분할: 마우스 이벤트 ────────────────────
+    def _sp_on_press(self, event):
+        self.sp_canvas.focus_set()
+        hit = self._sp_hit_test(event.x, event.y)
+        if hit:
+            self.sp_drag = hit
+            self.sp_selected_line = hit
+            self._sp_draw()
+        else:
+            region = self._sp_region_at(event.x, event.y)
+            if region is not None:
+                if region in self.sp_selected_regions:
+                    self.sp_selected_regions.discard(region)
+                else:
+                    self.sp_selected_regions.add(region)
+                self._sp_update_region_list()
+                self._sp_draw()
+            self.sp_selected_line = None
+            self.sp_drag = None
+
+    def _sp_on_drag(self, event):
+        if self.sp_drag is None or self.sp_img is None:
+            return
+        ih, iw = self.sp_img.shape[:2]
+        dw = int(iw * self.sp_scale)
+        dh = int(ih * self.sp_scale)
+        dtype, idx = self.sp_drag
+        if dtype == 'h':
+            fy = max(0.005, min(0.995, (event.y - self.sp_oy) / dh))
+            self.sp_h_lines[idx] = fy
+        else:
+            fx = max(0.005, min(0.995, (event.x - self.sp_ox) / dw))
+            self.sp_v_lines[idx] = fx
+        self.sp_selected_regions = set()
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    def _sp_on_release(self, event):
+        if self.sp_drag:
+            self.sp_h_lines.sort()
+            self.sp_v_lines.sort()
+            self.sp_drag = None
+            self._sp_draw()
+
+    def _sp_on_move(self, event):
+        hit = self._sp_hit_test(event.x, event.y)
+        if hit != self.sp_hover:
+            self.sp_hover = hit
+            if hit:
+                cur = 'sb_v_double_arrow' if hit[0] == 'h' \
+                      else 'sb_h_double_arrow'
+            else:
+                cur = 'crosshair'
+            self.sp_canvas.configure(cursor=cur)
+            self._sp_draw()
+
+    def _sp_on_leave(self):
+        if self.sp_hover:
+            self.sp_hover = None
+            self.sp_canvas.configure(cursor='crosshair')
+            self._sp_draw()
+
+    # ── 분할: 선 추가/삭제 ────────────────────
+    def _sp_add_h_line(self):
+        if self.sp_img is None:
+            messagebox.showinfo("알림", "먼저 이미지를 불러오세요.")
+            return
+        edges = [0.0] + sorted(self.sp_h_lines) + [1.0]
+        gaps  = [(edges[i+1] - edges[i], i) for i in range(len(edges)-1)]
+        _, gi = max(gaps)
+        self.sp_h_lines.append((edges[gi] + edges[gi+1]) / 2)
+        self.sp_h_lines.sort()
+        self.sp_selected_regions = set()
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    def _sp_add_v_line(self):
+        if self.sp_img is None:
+            messagebox.showinfo("알림", "먼저 이미지를 불러오세요.")
+            return
+        edges = [0.0] + sorted(self.sp_v_lines) + [1.0]
+        gaps  = [(edges[i+1] - edges[i], i) for i in range(len(edges)-1)]
+        _, gi = max(gaps)
+        self.sp_v_lines.append((edges[gi] + edges[gi+1]) / 2)
+        self.sp_v_lines.sort()
+        self.sp_selected_regions = set()
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    def _sp_delete_line(self, event=None):
+        if self.sp_selected_line is None:
+            messagebox.showinfo("알림", "삭제할 선을 먼저 클릭하여 선택하세요.")
+            return
+        dtype, idx = self.sp_selected_line
+        if dtype == 'h' and 0 <= idx < len(self.sp_h_lines):
+            del self.sp_h_lines[idx]
+        elif dtype == 'v' and 0 <= idx < len(self.sp_v_lines):
+            del self.sp_v_lines[idx]
+        self.sp_selected_line = None
+        self.sp_selected_regions = set()
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    def _sp_clear_lines(self):
+        self.sp_h_lines  = []
+        self.sp_v_lines  = []
+        self.sp_selected_regions = set()
+        self.sp_selected_line    = None
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    # ── 분할: 영역 목록 ───────────────────────
+    def _sp_get_regions(self):
+        if self.sp_img is None:
+            return []
+        ih, iw = self.sp_img.shape[:2]
+        h_edges = [0.0] + sorted(self.sp_h_lines) + [1.0]
+        v_edges = [0.0] + sorted(self.sp_v_lines) + [1.0]
+        result  = []
+        for ri in range(len(h_edges)-1):
+            for ci in range(len(v_edges)-1):
+                y0 = int(h_edges[ri]   * ih)
+                y1 = int(h_edges[ri+1] * ih)
+                x0 = int(v_edges[ci]   * iw)
+                x1 = int(v_edges[ci+1] * iw)
+                result.append((ri, ci, x0, y0, x1, y1))
+        return result
+
+    def _sp_update_region_list(self):
+        t = self.sp_region_tree
+        t.delete(*t.get_children())
+        for ri, ci, x0, y0, x1, y1 in self._sp_get_regions():
+            sel  = '✓' if (ri, ci) in self.sp_selected_regions else '☐'
+            tag  = 'sel_on' if (ri, ci) in self.sp_selected_regions \
+                   else 'sel_off'
+            name = f"{ri+1}행 {ci+1}열"
+            size = f"{x1-x0}×{y1-y0}"
+            t.insert('', 'end', iid=f"{ri}_{ci}",
+                     values=(sel, name, size), tags=(tag,))
+
+    def _sp_on_region_tree_click(self, event):
+        iid = self.sp_region_tree.identify_row(event.y)
+        if not iid:
+            return
+        parts = iid.split('_')
+        if len(parts) == 2:
+            ri, ci = int(parts[0]), int(parts[1])
+            if (ri, ci) in self.sp_selected_regions:
+                self.sp_selected_regions.discard((ri, ci))
+            else:
+                self.sp_selected_regions.add((ri, ci))
+            self._sp_update_region_list()
+            self._sp_draw()
+        return 'break'
+
+    def _sp_select_all(self):
+        self.sp_selected_regions = {
+            (ri, ci) for ri, ci, *_ in self._sp_get_regions()}
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    def _sp_deselect_all(self):
+        self.sp_selected_regions = set()
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    # ── 분할: 저장 ────────────────────────────
+    def _sp_save_selected(self):
+        if self.sp_img is None:
+            messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
+            return
+        if not self.sp_selected_regions:
+            messagebox.showwarning("경고", "저장할 영역을 선택하세요.")
+            return
+        out_dir = filedialog.askdirectory(title="저장 폴더 선택")
+        if not out_dir:
+            return
+        out_dir   = Path(out_dir)
+        base_name = Path(self.sp_orig_path).stem \
+                    if self.sp_orig_path else "split"
+        saved = 0
+        for ri, ci, x0, y0, x1, y1 in self._sp_get_regions():
+            if (ri, ci) not in self.sp_selected_regions:
+                continue
+            crop = self.sp_img[y0:y1, x0:x1]
+            out_path = out_dir / f"{base_name}_{ri+1}_{ci+1}.jpg"
+            ok, buf  = cv2.imencode('.jpg', crop,
+                                    [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if ok:
+                buf.tofile(str(out_path))
+                saved += 1
+        messagebox.showinfo("저장 완료",
+                            f"{saved}개 영역이 저장되었습니다.\n{out_dir}")
+
+    # ── 분할: 즐겨찾기 ────────────────────────
+    def _sp_preset_path(self):
+        if getattr(sys, 'frozen', False):
+            base = Path(sys.executable).parent
+        else:
+            base = Path(__file__).parent
+        return base / 'split_presets.json'
+
+    def _sp_load_presets(self):
+        p = self._sp_preset_path()
+        try:
+            if p.exists():
+                with open(p, 'r', encoding='utf-8') as f:
+                    self.sp_presets = json.load(f)
+            else:
+                self.sp_presets = {}
+        except Exception:
+            self.sp_presets = {}
+        self._sp_refresh_preset_combo()
+
+    def _sp_save_presets_file(self):
+        try:
+            with open(self._sp_preset_path(), 'w', encoding='utf-8') as f:
+                json.dump(self.sp_presets, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            messagebox.showerror("오류", f"즐겨찾기 저장 실패\n{e}")
+
+    def _sp_refresh_preset_combo(self):
+        names = list(self.sp_presets.keys())
+        self.sp_preset_combo['values'] = names
+        if names:
+            self.sp_preset_combo.current(0)
+
+    def _sp_save_preset(self):
+        if not self.sp_h_lines and not self.sp_v_lines:
+            messagebox.showinfo("알림", "저장할 선이 없습니다.\n먼저 선을 추가하세요.")
+            return
+        name = simpledialog.askstring(
+            "즐겨찾기 저장", "즐겨찾기 이름을 입력하세요:",
+            parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self.sp_presets[name] = {
+            'h': sorted(self.sp_h_lines),
+            'v': sorted(self.sp_v_lines),
+        }
+        self._sp_save_presets_file()
+        self._sp_refresh_preset_combo()
+        self.sp_preset_var.set(name)
+
+    def _sp_apply_preset(self):
+        name = self.sp_preset_var.get()
+        if not name or name not in self.sp_presets:
+            messagebox.showinfo("알림", "불러올 즐겨찾기를 선택하세요.")
+            return
+        p = self.sp_presets[name]
+        self.sp_h_lines = list(p.get('h', []))
+        self.sp_v_lines = list(p.get('v', []))
+        self.sp_selected_regions = set()
+        self._sp_update_region_list()
+        self._sp_draw()
+
+    def _sp_delete_preset(self):
+        name = self.sp_preset_var.get()
+        if not name or name not in self.sp_presets:
+            messagebox.showinfo("알림", "삭제할 즐겨찾기를 선택하세요.")
+            return
+        if messagebox.askyesno("확인", f'"{name}" 즐겨찾기를 삭제하시겠습니까?'):
+            del self.sp_presets[name]
+            self._sp_save_presets_file()
+            self._sp_refresh_preset_combo()
 
     # ──────────────────────────────────────────
     # 목록 요약 및 인라인 편집
