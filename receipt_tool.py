@@ -110,6 +110,7 @@ class ReceiptApp:
         self.sp_h_lines:          list              = []
         self.sp_v_lines:          list              = []
         self.sp_selected_regions: set               = set()
+        self.sp_last_selected:    tuple | None      = None
         self.sp_drag:             tuple | None      = None
         self.sp_hover:            tuple | None      = None
         self.sp_selected_line:    tuple | None      = None
@@ -579,8 +580,9 @@ class ReceiptApp:
         self.sp_region_tree.column('sel',  width=38,  minwidth=38,  stretch=False, anchor='center')
         self.sp_region_tree.column('name', width=70,  minwidth=60,  stretch=True,  anchor='center')
         self.sp_region_tree.column('size', width=100, minwidth=80,  stretch=False, anchor='center')
-        self.sp_region_tree.tag_configure('sel_on',  foreground=C['green'])
-        self.sp_region_tree.tag_configure('sel_off', foreground=C['subtext'])
+        self.sp_region_tree.tag_configure('sel_on',   foreground=C['green'])
+        self.sp_region_tree.tag_configure('sel_last', foreground='#fab387')
+        self.sp_region_tree.tag_configure('sel_off',  foreground=C['subtext'])
 
         rvsb = ttk.Scrollbar(rf, orient='vertical',
                              command=self.sp_region_tree.yview)
@@ -597,8 +599,12 @@ class ReceiptApp:
         sbtn(bf2, "선택 해제", self._sp_deselect_all
              ).grid(row=0, column=1, sticky='ew', padx=2, pady=2)
 
+        sbtn(rp, "📋  선택 영역 복사 (Ctrl+C)", self._sp_copy_region,
+             C['accent'], 'white').grid(row=4, column=0,
+                                       sticky='ew', padx=8, pady=(0, 4))
+
         sbtn(rp, "💾  선택 영역 저장", self._sp_save_selected,
-             '#40a02b', 'white').grid(row=4, column=0,
+             '#40a02b', 'white').grid(row=5, column=0,
                                      sticky='ew', padx=8, pady=(0, 12))
 
         # ── 이벤트 ──
@@ -608,6 +614,8 @@ class ReceiptApp:
         self.sp_canvas.bind('<ButtonRelease-1>', self._sp_on_release)
         self.sp_canvas.bind('<Motion>',          self._sp_on_move)
         self.sp_canvas.bind('<Leave>',           lambda _: self._sp_on_leave())
+        self.sp_canvas.bind('<Control-c>',       lambda _: self._sp_copy_region())
+        self.sp_canvas.bind('<Control-C>',       lambda _: self._sp_copy_region())
         self.sp_canvas.bind('<Control-v>',       lambda _: self._sp_paste_image())
         self.sp_canvas.bind('<Control-V>',       lambda _: self._sp_paste_image())
         self.sp_canvas.bind('<Delete>',          lambda _: self._sp_delete_line())
@@ -646,6 +654,7 @@ class ReceiptApp:
         self.sp_h_lines     = []
         self.sp_v_lines     = []
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self.sp_drag        = None
         self.sp_hover       = None
         self.sp_selected_line = None
@@ -690,7 +699,14 @@ class ReceiptApp:
                 y0 = self.sp_oy + int(h_edges[ri]   * dh)
                 x1 = self.sp_ox + int(v_edges[ci+1] * dw)
                 y1 = self.sp_oy + int(h_edges[ri+1] * dh)
-                if (ri, ci) in self.sp_selected_regions:
+                if (ri, ci) == self.sp_last_selected:
+                    c.create_rectangle(x0, y0, x1, y1,
+                                       outline='#fab387', fill='', width=3)
+                    mx, my = (x0 + x1) // 2, (y0 + y1) // 2
+                    c.create_text(mx, my, text=f"{ri+1}-{ci+1}",
+                                  fill='#fab387',
+                                  font=('맑은 고딕', 10, 'bold'))
+                elif (ri, ci) in self.sp_selected_regions:
                     c.create_rectangle(x0, y0, x1, y1,
                                        outline=C['green'], fill='', width=3)
                     mx, my = (x0 + x1) // 2, (y0 + y1) // 2
@@ -784,8 +800,11 @@ class ReceiptApp:
             if region is not None:
                 if region in self.sp_selected_regions:
                     self.sp_selected_regions.discard(region)
+                    if self.sp_last_selected == region:
+                        self.sp_last_selected = None
                 else:
                     self.sp_selected_regions.add(region)
+                    self.sp_last_selected = region
                 self._sp_update_region_list()
                 self._sp_draw()
             self.sp_selected_line = None
@@ -805,6 +824,7 @@ class ReceiptApp:
             fx = max(0.005, min(0.995, (event.x - self.sp_ox) / dw))
             self.sp_v_lines[idx] = fx
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
 
@@ -844,6 +864,7 @@ class ReceiptApp:
         self.sp_h_lines.append((edges[gi] + edges[gi+1]) / 2)
         self.sp_h_lines.sort()
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
 
@@ -857,6 +878,7 @@ class ReceiptApp:
         self.sp_v_lines.append((edges[gi] + edges[gi+1]) / 2)
         self.sp_v_lines.sort()
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
 
@@ -871,6 +893,7 @@ class ReceiptApp:
             del self.sp_v_lines[idx]
         self.sp_selected_line = None
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
 
@@ -878,6 +901,7 @@ class ReceiptApp:
         self.sp_h_lines  = []
         self.sp_v_lines  = []
         self.sp_selected_regions = set()
+        self.sp_last_selected    = None
         self.sp_selected_line    = None
         self._sp_update_region_list()
         self._sp_draw()
@@ -903,9 +927,15 @@ class ReceiptApp:
         t = self.sp_region_tree
         t.delete(*t.get_children())
         for ri, ci, x0, y0, x1, y1 in self._sp_get_regions():
-            sel  = '✓' if (ri, ci) in self.sp_selected_regions else '☐'
-            tag  = 'sel_on' if (ri, ci) in self.sp_selected_regions \
-                   else 'sel_off'
+            if (ri, ci) == self.sp_last_selected:
+                sel = '★'
+                tag = 'sel_last'
+            elif (ri, ci) in self.sp_selected_regions:
+                sel = '✓'
+                tag = 'sel_on'
+            else:
+                sel = '☐'
+                tag = 'sel_off'
             name = f"{ri+1}행 {ci+1}열"
             size = f"{x1-x0}×{y1-y0}"
             t.insert('', 'end', iid=f"{ri}_{ci}",
@@ -920,8 +950,11 @@ class ReceiptApp:
             ri, ci = int(parts[0]), int(parts[1])
             if (ri, ci) in self.sp_selected_regions:
                 self.sp_selected_regions.discard((ri, ci))
+                if self.sp_last_selected == (ri, ci):
+                    self.sp_last_selected = None
             else:
                 self.sp_selected_regions.add((ri, ci))
+                self.sp_last_selected = (ri, ci)
             self._sp_update_region_list()
             self._sp_draw()
         return 'break'
@@ -929,13 +962,62 @@ class ReceiptApp:
     def _sp_select_all(self):
         self.sp_selected_regions = {
             (ri, ci) for ri, ci, *_ in self._sp_get_regions()}
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
 
     def _sp_deselect_all(self):
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
+
+    # ── 분할: 복사 ────────────────────────────
+    def _sp_copy_region(self):
+        if self.sp_img is None:
+            messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
+            return
+        region = self.sp_last_selected
+        if region is None:
+            messagebox.showwarning("경고", "복사할 영역을 선택하세요.\n(마지막으로 클릭한 영역이 복사됩니다)")
+            return
+        ri, ci = region
+        regions = {(r, c): (x0, y0, x1, y1)
+                   for r, c, x0, y0, x1, y1 in self._sp_get_regions()}
+        if (ri, ci) not in regions:
+            return
+        x0, y0, x1, y1 = regions[(ri, ci)]
+        crop = self.sp_img[y0:y1, x0:x1]
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                tmp_path = f.name
+            ok, buf = cv2.imencode('.png', crop)
+            if not ok:
+                raise RuntimeError("인코딩 실패")
+            buf.tofile(tmp_path)
+            ps_script = (
+                "Add-Type -AssemblyName System.Windows.Forms;"
+                "Add-Type -AssemblyName System.Drawing;"
+                f"$img = [System.Drawing.Image]::FromFile('{tmp_path}');"
+                "[System.Windows.Forms.Clipboard]::SetImage($img);"
+                "$img.Dispose();"
+            )
+            subprocess.run(
+                ['powershell', '-NoProfile', '-Command', ps_script],
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=15,
+            )
+            messagebox.showinfo("복사 완료",
+                                f"{ri+1}행 {ci+1}열 영역을 클립보드에 복사했습니다.")
+        except Exception as e:
+            messagebox.showerror("오류", f"클립보드 복사 실패\n{e}")
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
     # ── 분할: 저장 ────────────────────────────
     def _sp_save_selected(self):
@@ -1025,6 +1107,7 @@ class ReceiptApp:
         self.sp_h_lines = list(p.get('h', []))
         self.sp_v_lines = list(p.get('v', []))
         self.sp_selected_regions = set()
+        self.sp_last_selected = None
         self._sp_update_region_list()
         self._sp_draw()
 
