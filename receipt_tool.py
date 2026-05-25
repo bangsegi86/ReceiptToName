@@ -1642,8 +1642,20 @@ class ReceiptApp:
                          40, w, h, 1, 32, 0, len(pixel_data), 0, 0, 0, 0)
         dib = bi + pixel_data
 
+        from ctypes import wintypes
         k32 = ctypes.windll.kernel32
         u32 = ctypes.windll.user32
+
+        # 64비트 포인터/핸들 잘림 방지를 위해 restype/argtypes 명시
+        k32.GlobalAlloc.restype  = wintypes.HGLOBAL
+        k32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        k32.GlobalLock.restype   = ctypes.c_void_p
+        k32.GlobalLock.argtypes  = [wintypes.HGLOBAL]
+        k32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        u32.OpenClipboard.argtypes  = [wintypes.HWND]
+        u32.SetClipboardData.restype  = wintypes.HANDLE
+        u32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+
         GMEM_MOVEABLE = 0x0002
         CF_DIB = 8
 
@@ -1651,13 +1663,19 @@ class ReceiptApp:
         if not hMem:
             raise RuntimeError("GlobalAlloc 실패")
         pMem = k32.GlobalLock(hMem)
+        if not pMem:
+            k32.GlobalFree(hMem)
+            raise RuntimeError("GlobalLock 실패")
         ctypes.memmove(pMem, dib, len(dib))
         k32.GlobalUnlock(hMem)
         if not u32.OpenClipboard(None):
+            k32.GlobalFree(hMem)
             raise RuntimeError("OpenClipboard 실패")
         try:
             u32.EmptyClipboard()
-            u32.SetClipboardData(CF_DIB, hMem)
+            if not u32.SetClipboardData(CF_DIB, hMem):
+                k32.GlobalFree(hMem)
+                raise RuntimeError("SetClipboardData 실패")
         finally:
             u32.CloseClipboard()
 
