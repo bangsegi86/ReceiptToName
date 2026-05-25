@@ -8,6 +8,8 @@
 import sys
 import os
 import re
+import struct
+import ctypes
 import subprocess
 import tempfile
 import threading
@@ -988,36 +990,11 @@ class ReceiptApp:
             return
         x0, y0, x1, y1 = regions[(ri, ci)]
         crop = self.sp_img[y0:y1, x0:x1]
-        tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                tmp_path = f.name
-            ok, buf = cv2.imencode('.png', crop)
-            if not ok:
-                raise RuntimeError("인코딩 실패")
-            buf.tofile(tmp_path)
-            ps_script = (
-                "Add-Type -AssemblyName System.Windows.Forms;"
-                "Add-Type -AssemblyName System.Drawing;"
-                f"$img = [System.Drawing.Image]::FromFile('{tmp_path}');"
-                "[System.Windows.Forms.Clipboard]::SetImage($img);"
-                "$img.Dispose();"
-            )
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_script],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=15,
-            )
-            messagebox.showinfo("복사 완료",
-                                f"{ri+1}행 {ci+1}열 영역을 클립보드에 복사했습니다.")
+            self._set_clipboard_image(crop)
+            self._show_toast(f"📋 {ri+1}행 {ci+1}열 복사됐습니다")
         except Exception as e:
             messagebox.showerror("오류", f"클립보드 복사 실패\n{e}")
-        finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
 
     # ── 분할: 저장 ────────────────────────────
     def _sp_save_selected(self):
@@ -1625,6 +1602,65 @@ class ReceiptApp:
         self._apply_correction()
         messagebox.showinfo("완료", "원본 파일을 보정된 이미지로 대체했습니다.")
 
+    # ── 토스트 알림 ────────────────────────────
+    def _show_toast(self, message, duration=2000, color='#a6e3a1'):
+        if hasattr(self, '_toast_win') and self._toast_win:
+            try:
+                self._toast_win.destroy()
+            except Exception:
+                pass
+        toast = tk.Toplevel(self.root)
+        toast.overrideredirect(True)
+        toast.attributes('-topmost', True)
+        toast.configure(bg='#313244')
+        tk.Label(toast, text=message, bg='#313244', fg=color,
+                 font=('맑은 고딕', 10, 'bold'), padx=18, pady=10).pack()
+        toast.update_idletasks()
+        tw = toast.winfo_reqwidth()
+        th = toast.winfo_reqheight()
+        rx = self.root.winfo_x() + self.root.winfo_width()
+        ry = self.root.winfo_y() + self.root.winfo_height()
+        toast.geometry(f'+{rx - tw - 20}+{ry - th - 40}')
+        self._toast_win = toast
+
+        def _dismiss():
+            try:
+                toast.destroy()
+            except Exception:
+                pass
+        toast.after(duration, _dismiss)
+
+    # ── 클립보드 이미지 복사 (Win32 ctypes, 빠름) ──
+    def _set_clipboard_image(self, bgr_img):
+        """BGR numpy 이미지를 클립보드에 복사. Win32 API 직접 호출."""
+        h, w = bgr_img.shape[:2]
+        bgra = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2BGRA)
+        bgra_flip = cv2.flip(bgra, 0)  # bottom-up DIB
+        pixel_data = bgra_flip.tobytes()
+
+        bi = struct.pack('<IiiHHIIiiII',
+                         40, w, h, 1, 32, 0, len(pixel_data), 0, 0, 0, 0)
+        dib = bi + pixel_data
+
+        k32 = ctypes.windll.kernel32
+        u32 = ctypes.windll.user32
+        GMEM_MOVEABLE = 0x0002
+        CF_DIB = 8
+
+        hMem = k32.GlobalAlloc(GMEM_MOVEABLE, len(dib))
+        if not hMem:
+            raise RuntimeError("GlobalAlloc 실패")
+        pMem = k32.GlobalLock(hMem)
+        ctypes.memmove(pMem, dib, len(dib))
+        k32.GlobalUnlock(hMem)
+        if not u32.OpenClipboard(None):
+            raise RuntimeError("OpenClipboard 실패")
+        try:
+            u32.EmptyClipboard()
+            u32.SetClipboardData(CF_DIB, hMem)
+        finally:
+            u32.CloseClipboard()
+
     # ── 현재 이미지 클립보드 복사
     # ──────────────────────────────────────────
     def _copy_image_to_clipboard(self):
@@ -1633,33 +1669,10 @@ class ReceiptApp:
             messagebox.showwarning("경고", "먼저 이미지를 불러오세요.")
             return
         try:
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-                tmp_path = f.name
-            ok, buf = cv2.imencode('.png', img)
-            if not ok:
-                raise RuntimeError("인코딩 실패")
-            buf.tofile(tmp_path)
-
-            ps_script = (
-                "Add-Type -AssemblyName System.Windows.Forms;"
-                "Add-Type -AssemblyName System.Drawing;"
-                f"$img = [System.Drawing.Image]::FromFile('{tmp_path}');"
-                "[System.Windows.Forms.Clipboard]::SetImage($img);"
-                "$img.Dispose();"
-            )
-            subprocess.run(
-                ['powershell', '-NoProfile', '-Command', ps_script],
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=15,
-            )
-            messagebox.showinfo("복사 완료", "현재 이미지를 클립보드에 복사했습니다.")
+            self._set_clipboard_image(img)
+            self._show_toast("📋 클립보드에 복사됐습니다")
         except Exception as e:
             messagebox.showerror("오류", f"클립보드 복사 실패\n{e}")
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
 
     # ── 현재 이미지 압축 저장
     # ──────────────────────────────────────────
