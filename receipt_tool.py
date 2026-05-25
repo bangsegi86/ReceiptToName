@@ -83,6 +83,7 @@ class ReceiptApp:
         self.receipt_data: list[dict] = []
         self._loading:     bool       = False
         self._active_col:  int        = 1   # 1=결제일자, 2=합계금액
+        self._thr_after_id            = None  # 감지 강도 슬라이더 디바운스
 
         # 목록 ↔ 우측 패널 동기화 트레이스
         self.date_var.trace_add('write',   self._on_field_change)
@@ -153,6 +154,8 @@ class ReceiptApp:
         style.map('TNotebook.Tab',
             background=[('selected', C['accent']), ('active', C['surface'])],
             foreground=[('selected', '#1e1e2e'), ('active', C['text'])])
+        style.configure('Horizontal.TScale',
+            background=C['panel'], troughcolor=C['surface'], borderwidth=0)
 
         self.root.geometry("1560x820")
         self.root.minsize(1100, 620)
@@ -199,6 +202,21 @@ class ReceiptApp:
         self.mode_lbl = tk.Label(hdr, text="", bg=C['panel'], fg=C['yellow'],
                                  font=('맑은 고딕', 9))
         self.mode_lbl.pack(side=tk.LEFT)
+
+        # 구역 감지 강도 슬라이더 (0=자동 스윕, 1~255=수동 역치)
+        thr_box = tk.Frame(hdr, bg=C['panel'])
+        thr_box.pack(side=tk.RIGHT)
+        self.thr_val_lbl = tk.Label(thr_box, text="자동", bg=C['panel'],
+                                    fg=C['accent'], font=('맑은 고딕', 9, 'bold'),
+                                    width=4, anchor='e')
+        self.thr_val_lbl.pack(side=tk.RIGHT, padx=(4, 0))
+        self.thr_var = tk.IntVar(value=0)
+        self.thr_scale = ttk.Scale(thr_box, from_=0, to=255, length=150,
+                                   orient=tk.HORIZONTAL, variable=self.thr_var,
+                                   command=self._on_threshold_change)
+        self.thr_scale.pack(side=tk.RIGHT)
+        tk.Label(thr_box, text="🎚 감지 강도", bg=C['panel'], fg=C['subtext'],
+                 font=('맑은 고딕', 9)).pack(side=tk.RIGHT, padx=(0, 6))
 
         cf = tk.Frame(left, bg=C['canvas_bg'])
         cf.grid(row=1, column=0, sticky='nsew', padx=10, pady=4)
@@ -1608,7 +1626,9 @@ class ReceiptApp:
         if self.orig_img is None:
             return
         h, w   = self.orig_img.shape[:2]
-        corners = self._detect_receipt(self.orig_img)
+        thr = self.thr_var.get() if hasattr(self, 'thr_var') else 0
+        corners = self._detect_receipt(self.orig_img,
+                                       threshold=(None if thr == 0 else thr))
         if corners is None:
             corners = [[0.0, 0.0], [float(w), 0.0],
                        [float(w), float(h)], [0.0, float(h)]]
@@ -1616,7 +1636,18 @@ class ReceiptApp:
         self._draw_corners()
         self._apply_correction()
 
-    def _detect_receipt(self, img):
+    def _on_threshold_change(self, val):
+        v = int(float(val))
+        self.thr_val_lbl.config(text="자동" if v == 0 else str(v))
+        if self.orig_img is None:
+            return
+        if self._thr_after_id is not None:
+            self.root.after_cancel(self._thr_after_id)
+        self._thr_after_id = self.root.after(120, self._auto_correct)
+
+    def _detect_receipt(self, img, threshold=None):
+        # threshold=None  → 자동: 모든 역치(240~20) 스윕 후 최대 윤곽
+        # threshold=정수  → 수동: 해당 역치만 사용 (슬라이더 조절값)
         h, w = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         min_area = w * h * 0.05
@@ -1639,7 +1670,8 @@ class ReceiptApp:
         best_cnt  = None
         best_area = 0
 
-        for tv in range(240, 20, -10):
+        tv_values = range(240, 20, -10) if threshold is None else [int(threshold)]
+        for tv in tv_values:
             for flag in (cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV):
                 _, mask = cv2.threshold(blr, tv, 255, flag)
                 mask    = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_k)
@@ -1653,9 +1685,13 @@ class ReceiptApp:
                     best_cnt  = cnt
                     best_area = area
 
-        # 이미지 면적의 40% 미만인 윤곽 = 영수증 내부 텍스트 덩어리일 가능성 높음
-        # → 영수증이 프레임을 꽉 채운 경우이므로 None 반환 → 호출측에서 전체 이미지 코너 사용
-        if best_cnt is not None and best_area >= w * h * 0.40:
+        if threshold is None:
+            # 자동 모드: 40% 미만 윤곽은 내부 텍스트로 보고 전체 프레임 처리
+            if best_cnt is not None and best_area >= w * h * 0.40:
+                return cnt_to_corners(best_cnt)
+            return None
+        # 수동 모드: 해당 역치로 찾은 윤곽을 그대로 반환
+        if best_cnt is not None:
             return cnt_to_corners(best_cnt)
         return None
 
