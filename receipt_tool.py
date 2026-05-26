@@ -180,7 +180,6 @@ class ReceiptApp:
 
         mt.columnconfigure(0, weight=0, minsize=380)
         mt.columnconfigure(1, weight=3)
-        mt.columnconfigure(2, weight=0, minsize=310)
         mt.rowconfigure(0, weight=1)
 
         self._build_list_panel()
@@ -244,122 +243,34 @@ class ReceiptApp:
                              activebackground=C['button'], activeforeground=C['text'],
                              cursor='hand2', bd=0)
 
-        # 이전/다음은 오른쪽에 고정 (RIGHT pack → 항상 보임)
-        self.next_btn = btn(bf, "다음 ▶", self._next_file)
+        # 이전/다음 — 다른 버튼과 같은 2줄 스타일
+        self.next_btn = btn(bf, "다음\n▶", self._next_file)
         self.next_btn.pack(side=tk.RIGHT, padx=2)
-        self.prev_btn = btn(bf, "◀ 이전", self._prev_file)
+        self.prev_btn = btn(bf, "◀\n이전", self._prev_file)
         self.prev_btn.pack(side=tk.RIGHT, padx=2)
         tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.RIGHT)
 
-        # 보정 관련 버튼 — 2줄 텍스트로 폭 축소
+        # 보정 관련 버튼
         btn(bf, "✨\n자동 보정",   self._auto_correct).pack(side=tk.LEFT, padx=2)
         btn(bf, "✏️\n수동 조정",   self._toggle_manual).pack(side=tk.LEFT, padx=2)
         btn(bf, "💾\n원본 대체",   self._replace_with_warped,
             C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
-        btn(bf, "📋\n이미지 복사", self._copy_image_to_clipboard,
+        btn(bf, "📋\n복사",        self._copy_image_to_clipboard,
             C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
         btn(bf, "🗜\n압축 저장",   self._compress_current).pack(side=tk.LEFT, padx=2)
+        tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.LEFT)
+        btn(bf, "✅\n최종 저장",   self._save,
+            '#40a02b', 'white', bold=True).pack(side=tk.LEFT, padx=2)
 
-        # ─ 우측 패널 ─
-        right = tk.Frame(mt, bg=C['panel'], width=310)
-        right.grid(row=0, column=2, sticky='nsew', padx=(4, 8), pady=8)
-        right.pack_propagate(False)
-        right.columnconfigure(0, weight=1)
-
-        row = 0
-
-        tk.Label(right, text="보정 미리보기", bg=C['panel'], fg=C['subtext'],
-                 font=('맑은 고딕', 10)).grid(row=row, column=0,
-                                              sticky='w', padx=12, pady=(10, 2))
-        row += 1
-
-        pf = tk.Frame(right, bg=C['canvas_bg'], height=260)
-        pf.grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 6))
-        pf.pack_propagate(False)
-        self.prev_canvas = tk.Canvas(pf, bg=C['canvas_bg'], highlightthickness=0)
-        self.prev_canvas.pack(fill=tk.BOTH, expand=True)
-        row += 1
-
-        ttk.Separator(right).grid(row=row, column=0, sticky='ew', padx=12, pady=6)
-        row += 1
-
-        self.ocr_btn = tk.Button(
-            right, text="🔍  OCR 실행 (현재 파일)",
-            command=self._run_ocr,
-            bg=C['surface'], fg=C['text'], relief=tk.FLAT,
-            padx=10, pady=8, font=('맑은 고딕', 10, 'bold'),
-            activebackground=C['button'], activeforeground=C['text'],
-            cursor='hand2', bd=0,
-        )
-        self.ocr_btn.grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 4))
-        row += 1
-
+        # ─ 히든 프레임: 코드 참조용 위젯 (화면에 표시 안 함) ─
+        _hf = tk.Frame(self.root)  # 배치하지 않음
+        self.prev_canvas   = tk.Canvas(_hf, bg=C['canvas_bg'], highlightthickness=0)
+        self.ocr_btn       = tk.Button(_hf, text="", command=self._run_ocr)
         self.ocr_status_var = tk.StringVar(value="대기 중")
-        tk.Label(right, textvariable=self.ocr_status_var, bg=C['panel'],
-                 fg=C['dim'], font=('맑은 고딕', 8)
-                 ).grid(row=row, column=0, sticky='w', padx=12)
-        row += 1
-
-        self.ocr_progress = ttk.Progressbar(right, mode='indeterminate')
-        self.ocr_progress.grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 4))
-        self.ocr_progress.grid_remove()
-        row += 1
-
-        tf = tk.Frame(right, bg=C['panel'])
-        tf.grid(row=row, column=0, sticky='nsew', padx=12, pady=(2, 6))
-        right.rowconfigure(row, weight=1)
-        self.ocr_text = tk.Text(tf, height=4, bg=C['canvas_bg'], fg=C['subtext'],
-                                font=('맑은 고딕', 9), relief=tk.FLAT, bd=4,
-                                wrap=tk.WORD, insertbackground=C['text'])
-        sb = ttk.Scrollbar(tf, orient=tk.VERTICAL, command=self.ocr_text.yview)
-        self.ocr_text.configure(yscrollcommand=sb.set)
-        sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.ocr_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        row += 1
-
-        ttk.Separator(right).grid(row=row, column=0, sticky='ew', padx=12, pady=6)
-        row += 1
-
-        tk.Label(right, text="결제 일자", bg=C['panel'], fg=C['subtext'],
-                 font=('맑은 고딕', 9, 'bold')).grid(row=row, column=0,
-                                                      sticky='w', padx=12, pady=(4, 0))
-        row += 1
-        self.date_var = tk.StringVar()
-        tk.Entry(right, textvariable=self.date_var, font=('맑은 고딕', 13),
-                 bg=C['surface'], fg=C['text'], relief=tk.FLAT, bd=6,
-                 insertbackground=C['text']
-                 ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 2))
-        row += 1
-        tk.Label(right, text="YYYYMMDD 형식  예) 20260518",
-                 bg=C['panel'], fg=C['dim'], font=('맑은 고딕', 8)
-                 ).grid(row=row, column=0, sticky='w', padx=12)
-        row += 1
-
-        tk.Label(right, text="합계 금액", bg=C['panel'], fg=C['subtext'],
-                 font=('맑은 고딕', 9, 'bold')).grid(row=row, column=0,
-                                                      sticky='w', padx=12, pady=(8, 0))
-        row += 1
-        self.amount_var = tk.StringVar()
-        tk.Entry(right, textvariable=self.amount_var, font=('맑은 고딕', 13),
-                 bg=C['surface'], fg=C['text'], relief=tk.FLAT, bd=6,
-                 insertbackground=C['text']
-                 ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 2))
-        row += 1
-        tk.Label(right, text="숫자만 입력  예) 15500",
-                 bg=C['panel'], fg=C['dim'], font=('맑은 고딕', 8)
-                 ).grid(row=row, column=0, sticky='w', padx=12)
-        row += 1
-
-        ttk.Separator(right).grid(row=row, column=0, sticky='ew', padx=12, pady=10)
-        row += 1
-
-        tk.Button(right, text="✅  최종 승인 및 저장",
-                  command=self._save,
-                  bg='#40a02b', fg='white', relief=tk.FLAT,
-                  padx=14, pady=12, font=('맑은 고딕', 12, 'bold'),
-                  activebackground=C['green'], activeforeground='#1e1e2e',
-                  cursor='hand2', bd=0
-                  ).grid(row=row, column=0, sticky='ew', padx=12, pady=(0, 12))
+        self.ocr_progress  = ttk.Progressbar(_hf, mode='indeterminate')
+        self.ocr_text      = tk.Text(_hf, height=4)
+        self.date_var      = tk.StringVar()
+        self.amount_var    = tk.StringVar()
 
         self._build_splitter_tab(tab2)
 
@@ -1923,27 +1834,60 @@ class ReceiptApp:
     # OCR
     # ──────────────────────────────────────────
     def _run_ocr_batch(self):
-        """목록에서 선택된 항목을 순차적으로 OCR 실행."""
+        """선택 항목 병렬 전처리 → 순차 OCR."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         selected = self.receipt_tree.selection()
         if not selected:
             messagebox.showwarning("선택 없음",
                                    "목록에서 OCR 할 항목을 선택하세요.\n(Ctrl+클릭으로 다중 선택)")
             return
 
-        self._ocr_queue = [int(iid) for iid in selected]
-        self._ocr_total  = len(self._ocr_queue)
-        self._ocr_done_n = 0
+        indices = [int(iid) for iid in selected]
+        total   = len(indices)
+        for idx in indices:
+            self._mark_list_processing(idx)
         self.batch_ocr_btn.configure(state=tk.DISABLED,
-                                     text=f"OCR 실행 중… (0/{self._ocr_total})")
-        self._ocr_next()
+                                     text=f"전처리 중… (0/{total})")
 
-    def _ocr_next(self):
-        if not self._ocr_queue:
-            self.batch_ocr_btn.configure(state=tk.NORMAL, text="선택 항목 OCR 실행")
-            return
-        idx = self._ocr_queue.pop(0)
-        self._mark_list_processing(idx)
-        threading.Thread(target=self._ocr_seq_worker, args=(idx,), daemon=True).start()
+        def worker():
+            # 1단계: 이미지 로드+보정 병렬 처리 (I/O 바운드)
+            preloaded = [None] * total
+            n_pre = [0]
+            with ThreadPoolExecutor(max_workers=min(4, total)) as ex:
+                fut_map = {ex.submit(self._load_and_warp_safe, indices[i]): i
+                           for i in range(total)}
+                for fut in as_completed(fut_map):
+                    i = fut_map[fut]
+                    try:
+                        preloaded[i] = fut.result()
+                    except Exception:
+                        preloaded[i] = None
+                    n_pre[0] += 1
+                    k = n_pre[0]
+                    self.root.after(0, lambda v=k: self.batch_ocr_btn.configure(
+                        text=f"전처리 중… ({v}/{total})"))
+
+            # 2단계: OCR 순차 처리 (PaddleOCR 스레드 비안전)
+            for k, idx in enumerate(indices):
+                img = preloaded[k]
+                try:
+                    text = self._do_ocr(img) if img is not None else ''
+                except Exception:
+                    text = ''
+                done = k + 1
+                self.root.after(0, lambda i=idx, t=text, d=done:
+                                self._ocr_batch_item_done(i, t, d, total))
+
+            self.root.after(0, lambda: self.batch_ocr_btn.configure(
+                state=tk.NORMAL, text="선택 항목 OCR 실행"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _load_and_warp_safe(self, idx: int):
+        try:
+            return self._load_and_warp(idx)
+        except Exception:
+            return None
 
     def _mark_list_processing(self, idx: int):
         try:
@@ -1953,15 +1897,7 @@ class ReceiptApp:
         except tk.TclError:
             pass
 
-    def _ocr_seq_worker(self, idx: int):
-        try:
-            target = self._load_and_warp(idx)
-            text   = self._do_ocr(target)
-        except Exception:
-            text = ''
-        self.root.after(0, lambda: self._ocr_seq_done(idx, text))
-
-    def _ocr_seq_done(self, idx: int, text: str):
+    def _ocr_batch_item_done(self, idx: int, text: str, done: int, total: int):
         date = amount = ''
         if text:
             date   = self._parse_date(text)
@@ -1974,22 +1910,14 @@ class ReceiptApp:
             if amount: rd['amount'] = amount
             self._update_list_row(idx)
 
-        if idx == self.queue_idx and text:
-            self.ocr_text.delete('1.0', tk.END)
-            self.ocr_text.insert(tk.END, text)
-            engine = "PaddleOCR" if (HAS_PADDLE and self._paddle_ready) else \
-                     ("Tesseract" if (HAS_TESSERACT and self._tess_cmd) else "Windows OCR")
-            self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식, {engine})")
+        if idx == self.queue_idx:
             self._loading = True
             if date:   self.date_var.set(date)
             if amount: self.amount_var.set(amount)
             self._loading = False
 
         self._update_summary()
-        self._ocr_done_n += 1
-        self.batch_ocr_btn.configure(
-            text=f"OCR 실행 중… ({self._ocr_done_n}/{self._ocr_total})")
-        self._ocr_next()
+        self.batch_ocr_btn.configure(text=f"OCR 실행 중… ({done}/{total})")
 
     # ──────────────────────────────────────────
     # 선택 항목 일괄 저장
