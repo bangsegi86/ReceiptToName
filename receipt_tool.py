@@ -66,6 +66,26 @@ class ReceiptApp:
 
     def __init__(self):
         self._build_root()
+
+        # 이미지 분할 탭 상태 — _build_ui() 에서 _sp_load_presets() 가
+        # self.sp_presets 를 채우므로, 빌드 전에 미리 초기화해 둔다.
+        # (빌드 후 초기화하면 로드한 즐겨찾기가 빈 dict 로 덮어써짐)
+        self.sp_img:              np.ndarray | None = None
+        self.sp_orig_path:        str | None        = None
+        self.sp_h_lines:          list              = []
+        self.sp_v_lines:          list              = []
+        self.sp_selected_regions: set               = set()
+        self.sp_last_selected:    tuple | None      = None
+        self.sp_drag:             tuple | None      = None
+        self.sp_hover:            tuple | None      = None
+        self.sp_selected_line:    tuple | None      = None
+        self.sp_scale:            float             = 1.0
+        self.sp_ox:               int               = 0
+        self.sp_oy:               int               = 0
+        self.sp_presets:          dict              = {}
+        self.sp_pending_preset:   dict | None       = None
+        self._sp_tk_img                             = None
+
         self._build_ui()
         self._bind_events()
 
@@ -106,22 +126,6 @@ class ReceiptApp:
             self.root.after(200, lambda: self.ocr_status_var.set(
                 f"PaddleOCR 로드 실패 → Tesseract 사용\n오류: {err_short}"))
 
-        # 이미지 분할 탭 상태
-        self.sp_img:              np.ndarray | None = None
-        self.sp_orig_path:        str | None        = None
-        self.sp_h_lines:          list              = []
-        self.sp_v_lines:          list              = []
-        self.sp_selected_regions: set               = set()
-        self.sp_last_selected:    tuple | None      = None
-        self.sp_drag:             tuple | None      = None
-        self.sp_hover:            tuple | None      = None
-        self.sp_selected_line:    tuple | None      = None
-        self.sp_scale:            float             = 1.0
-        self.sp_ox:               int               = 0
-        self.sp_oy:               int               = 0
-        self.sp_presets:          dict              = {}
-        self._sp_tk_img                             = None
-
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
@@ -160,12 +164,14 @@ class ReceiptApp:
         style.configure('Horizontal.TScale',
             background=C['panel'], troughcolor=C['surface'], borderwidth=0)
 
-        self.root.geometry("1560x820")
-        self.root.minsize(1100, 620)
+        win_w, win_h = 1380, 860
+        self.root.geometry(f"{win_w}x{win_h}")
+        self.root.minsize(1080, 640)
         self.root.update_idletasks()
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        self.root.geometry(f"1560x820+{(sw-1560)//2}+{(sh-820)//2}")
+        self.root.geometry(
+            f"{win_w}x{win_h}+{max((sw-win_w)//2, 0)}+{max((sh-win_h)//2, 0)}")
 
     # ── UI ────────────────────────────────────
     def _build_ui(self):
@@ -253,6 +259,8 @@ class ReceiptApp:
         # 보정 관련 버튼
         btn(bf, "✨\n자동 보정",   self._auto_correct).pack(side=tk.LEFT, padx=2)
         btn(bf, "✏️\n수동 조정",   self._toggle_manual).pack(side=tk.LEFT, padx=2)
+        btn(bf, "🔍\nOCR",         self._run_ocr,
+            C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
         btn(bf, "💾\n원본 대체",   self._replace_with_warped,
             C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
         btn(bf, "📋\n복사",        self._copy_image_to_clipboard,
@@ -418,36 +426,60 @@ class ReceiptApp:
                              activeforeground=C['text'],
                              cursor='hand2', bd=0)
 
-        # ── 툴바 ──
+        # ── 툴바 (1줄: 이미지/선 편집) ──
         tb = tk.Frame(parent, bg=C['panel'])
-        tb.pack(fill=tk.X, padx=8, pady=(8, 4))
+        tb.pack(fill=tk.X, padx=8, pady=(8, 0))
 
         sbtn(tb, "📂 불러오기", self._sp_load_file).pack(side=tk.LEFT, padx=2)
         sbtn(tb, "📋 붙여넣기 (Ctrl+V)", self._sp_paste_image).pack(side=tk.LEFT, padx=2)
 
         tk.Frame(tb, bg=C['dim'], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=3)
 
-        sbtn(tb, "+ 가로선", self._sp_add_h_line,
+        sbtn(tb, "＋ 가로선", self._sp_add_h_line,
              C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
-        sbtn(tb, "+ 세로선", self._sp_add_v_line,
+        sbtn(tb, "＋ 세로선", self._sp_add_v_line,
              C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
         sbtn(tb, "선 삭제 (Del)", self._sp_delete_line).pack(side=tk.LEFT, padx=2)
         sbtn(tb, "전체 초기화",  self._sp_clear_lines).pack(side=tk.LEFT, padx=2)
 
-        tk.Frame(tb, bg=C['dim'], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=8, pady=3)
+        # ── 툴바 (2줄: 선 유지 + 즐겨찾기) ──
+        tb2 = tk.Frame(parent, bg=C['panel'])
+        tb2.pack(fill=tk.X, padx=8, pady=(4, 4))
 
-        tk.Label(tb, text="즐겨찾기:", bg=C['panel'], fg=C['subtext'],
+        # 새 이미지를 불러와도 현재 선을 유지 (비슷한 영수증 연속 분할용)
+        self.sp_keep_lines = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            tb2, text="이미지 바뀌어도 선 유지",
+            variable=self.sp_keep_lines,
+            bg=C['panel'], fg=C['subtext'], font=('맑은 고딕', 9),
+            activebackground=C['panel'], activeforeground=C['text'],
+            selectcolor=C['surface'], bd=0, highlightthickness=0,
+            cursor='hand2',
+        ).pack(side=tk.LEFT, padx=2)
+
+        tk.Frame(tb2, bg=C['dim'], width=1).pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=3)
+
+        tk.Label(tb2, text="즐겨찾기:", bg=C['panel'], fg=C['subtext'],
                  font=('맑은 고딕', 9)).pack(side=tk.LEFT, padx=(0, 4))
 
         self.sp_preset_var = tk.StringVar()
-        self.sp_preset_combo = ttk.Combobox(tb, textvariable=self.sp_preset_var,
-                                             width=14, state='readonly',
+        self.sp_preset_combo = ttk.Combobox(tb2, textvariable=self.sp_preset_var,
+                                             width=18, state='readonly',
                                              font=('맑은 고딕', 9))
         self.sp_preset_combo.pack(side=tk.LEFT, padx=2)
+        # 콤보에서 고르면 즉시 적용 (버튼을 누르지 않아도 됨)
+        self.sp_preset_combo.bind('<<ComboboxSelected>>',
+                                  lambda _e: self._sp_apply_preset())
 
-        sbtn(tb, "저장",    self._sp_save_preset).pack(side=tk.LEFT, padx=2)
-        sbtn(tb, "불러오기", self._sp_apply_preset).pack(side=tk.LEFT, padx=2)
-        sbtn(tb, "삭제",    self._sp_delete_preset).pack(side=tk.LEFT, padx=2)
+        sbtn(tb2, "💾 저장",    self._sp_save_preset).pack(side=tk.LEFT, padx=2)
+        sbtn(tb2, "📂 불러오기", self._sp_apply_preset).pack(side=tk.LEFT, padx=2)
+        sbtn(tb2, "🗑 삭제",    self._sp_delete_preset).pack(side=tk.LEFT, padx=2)
+
+        # 안내 힌트
+        tk.Label(tb2,
+                 text="선을 추가한 뒤 💾저장 → 다음에 콤보에서 고르면 즉시 적용됩니다",
+                 bg=C['panel'], fg=C['dim'], font=('맑은 고딕', 8)
+                 ).pack(side=tk.LEFT, padx=10)
 
         # ── 본문 (캔버스 + 영역 패널) ──
         content = tk.Frame(parent, bg=C['bg'])
@@ -564,8 +596,21 @@ class ReceiptApp:
     def _sp_set_image(self, img, path):
         self.sp_img         = img
         self.sp_orig_path   = path
-        self.sp_h_lines     = []
-        self.sp_v_lines     = []
+
+        # 대기 중인 프리셋이 있으면 그 선을 사용,
+        # 없고 "선 유지"가 켜져 있으면 기존 선을 그대로 유지,
+        # 그 외엔 초기화
+        pending = getattr(self, 'sp_pending_preset', None)
+        if pending is not None:
+            self.sp_h_lines = list(pending.get('h', []))
+            self.sp_v_lines = list(pending.get('v', []))
+            self.sp_pending_preset = None
+        elif getattr(self, 'sp_keep_lines', None) and self.sp_keep_lines.get():
+            pass  # 기존 self.sp_h_lines / self.sp_v_lines 유지
+        else:
+            self.sp_h_lines = []
+            self.sp_v_lines = []
+
         self.sp_selected_regions = set()
         self.sp_last_selected = None
         self.sp_drag        = None
@@ -987,11 +1032,24 @@ class ReceiptApp:
         self.sp_preset_var.set(name)
 
     def _sp_apply_preset(self):
-        name = self.sp_preset_var.get()
+        name = (self.sp_preset_var.get() or '').strip()
         if not name or name not in self.sp_presets:
             messagebox.showinfo("알림", "불러올 즐겨찾기를 선택하세요.")
             return
         p = self.sp_presets[name]
+
+        # 아직 이미지가 없으면 다음에 이미지를 불러올 때 적용되도록 보관
+        if self.sp_img is None:
+            self.sp_pending_preset = {
+                'h': list(p.get('h', [])),
+                'v': list(p.get('v', [])),
+            }
+            messagebox.showinfo(
+                "알림",
+                f'"{name}" 선을 기억했습니다.\n'
+                "이미지를 불러오면 자동으로 적용됩니다.")
+            return
+
         self.sp_h_lines = list(p.get('h', []))
         self.sp_v_lines = list(p.get('v', []))
         self.sp_selected_regions = set()
