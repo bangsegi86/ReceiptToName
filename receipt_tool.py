@@ -114,6 +114,12 @@ class ReceiptApp:
         self._tess_cmd:  str | None = None
         self._tess_data: str | None = None
         self._init_tesseract()
+        # 엔진 레이블 초기값 (Paddle 초기화 전이라 실제 값은 잠시 후 업데이트됨)
+        if not HAS_PADDLE:
+            engine_txt = "Tesseract" if self._tess_cmd else "Windows OCR"
+            fg = C['yellow'] if self._tess_cmd else C['dim']
+            self.root.after(100, lambda t=engine_txt, f=fg:
+                            self.ocr_engine_lbl.configure(text=f"OCR 엔진: {t}", fg=f))
 
         self._paddle:           object | None = None
         self._paddle_ready:     bool          = False
@@ -436,7 +442,19 @@ class ReceiptApp:
         self.canvas.bind('<ButtonPress-1>',   self._on_click)
         self.canvas.bind('<B1-Motion>',       self._on_drag)
         self.canvas.bind('<ButtonRelease-1>', self._on_release)
-        self.canvas.bind('<Configure>',       lambda _: self._refresh_canvas())
+
+        def _on_canvas_resize(e):
+            self._refresh_canvas()
+            if not self.file_queue:
+                self.canvas.coords('hint', e.width // 2, e.height // 2)
+        self.canvas.bind('<Configure>', _on_canvas_resize)
+
+        # 전역 단축키
+        self.root.bind('<Control-o>', lambda _: self._open_file())
+        self.root.bind('<Control-O>', lambda _: self._open_file())
+        self.root.bind('<F5>',        lambda _: self._auto_correct())
+        self.root.bind('<Control-s>', lambda _: self._save())
+        self.root.bind('<Control-S>', lambda _: self._save())
 
         if HAS_DND:
             for w in (self.canvas, self.root):
@@ -525,6 +543,12 @@ class ReceiptApp:
         self.sp_canvas = tk.Canvas(cf, bg=C['canvas_bg'],
                                    highlightthickness=0, cursor='crosshair')
         self.sp_canvas.grid(row=0, column=0, sticky='nsew')
+
+        self.sp_info_lbl = tk.Label(cf, text="",
+                                    bg=C['canvas_bg'], fg=C['dim'],
+                                    font=('맑은 고딕', 8), anchor='w', padx=6)
+        self.sp_info_lbl.grid(row=1, column=0, sticky='ew')
+        cf.rowconfigure(1, weight=0)
 
         # ── 우측 영역 패널 ──
         rp = tk.Frame(content, bg=C['panel'], width=250)
@@ -653,6 +677,10 @@ class ReceiptApp:
         self.sp_selected_line = None
         self._sp_update_region_list()
         self._sp_draw()
+        if hasattr(self, 'sp_info_lbl') and self.sp_img is not None:
+            h, w = self.sp_img.shape[:2]
+            name = Path(self.sp_orig_path).name if self.sp_orig_path else "클립보드"
+            self.sp_info_lbl.configure(text=f"  {name}  |  {w} × {h} px")
 
     # ── 분할: 캔버스 그리기 ────────────────────
     def _sp_draw(self):
@@ -919,7 +947,8 @@ class ReceiptApp:
     def _sp_update_region_list(self):
         t = self.sp_region_tree
         t.delete(*t.get_children())
-        for ri, ci, x0, y0, x1, y1 in self._sp_get_regions():
+        regions = list(self._sp_get_regions())
+        for ri, ci, x0, y0, x1, y1 in regions:
             if (ri, ci) == self.sp_last_selected:
                 sel = '★'
                 tag = 'sel_last'
@@ -933,6 +962,16 @@ class ReceiptApp:
             size = f"{x1-x0}×{y1-y0}"
             t.insert('', 'end', iid=f"{ri}_{ci}",
                      values=(sel, name, size), tags=(tag,))
+        # 영역 수 / 선택 수 레이블 업데이트
+        if hasattr(self, 'sp_count_lbl'):
+            n_total = len(regions)
+            n_sel   = len(self.sp_selected_regions)
+            if n_total == 0:
+                self.sp_count_lbl.configure(text="")
+            else:
+                self.sp_count_lbl.configure(
+                    text=f"{n_sel}/{n_total}개 선택",
+                    fg=C['green'] if n_sel > 0 else C['dim'])
 
     def _sp_on_region_tree_click(self, event):
         iid = self.sp_region_tree.identify_row(event.y)
@@ -1012,8 +1051,8 @@ class ReceiptApp:
             if ok:
                 buf.tofile(str(out_path))
                 saved += 1
-        messagebox.showinfo("저장 완료",
-                            f"{saved}개 영역이 저장되었습니다.\n{out_dir}")
+        self._show_toast(f"💾 {saved}개 영역 저장 완료  →  {Path(out_dir).name}/",
+                         color=C['green'])
 
     # ── 분할: 즐겨찾기 ────────────────────────
     def _sp_preset_path(self):
@@ -1330,8 +1369,8 @@ class ReceiptApp:
 
     def _row_values(self, idx: int, path: str, data: dict) -> tuple:
         fname = Path(path).name
-        if len(fname) > 13:
-            fname = fname[:10] + '...'
+        if len(fname) > 18:
+            fname = fname[:15] + '…'
         date_disp   = data['date'] if data['date'] else '-'
         amount_disp = self._fmt_amount(data['amount'])
         size_disp   = self._fmt_size_col(data)
@@ -1451,6 +1490,9 @@ class ReceiptApp:
         self.corners    = []
         self.mode       = 'view'
         self.mode_lbl.configure(text="")
+        self.canvas.config(cursor='arrow')
+        fname = Path(self.orig_path).name if self.orig_path else ""
+        self.file_lbl.configure(text=fname)
 
         # OCR UI 초기화 (이전 파일의 진행 상태 제거)
         self.ocr_progress.stop()
@@ -1604,7 +1646,7 @@ class ReceiptApp:
                         [float(w), float(h)], [0.0, float(h)]]
         self._refresh_canvas()
         self._apply_correction()
-        messagebox.showinfo("완료", "원본 파일을 보정된 이미지로 대체했습니다.")
+        self._show_toast("✅ 원본 파일을 보정 이미지로 대체했습니다", color=C['green'])
 
     # ── 토스트 알림 ────────────────────────────
     def _show_toast(self, message, duration=2000, color='#a6e3a1'):
@@ -1731,10 +1773,9 @@ class ReceiptApp:
             def _fmt(b):
                 return f"{b/1024/1024:.1f}MB" if b >= 1024*1024 else f"{b/1024:.0f}KB"
 
-            msg = f"저장 완료: {out_path.name}"
-            if orig_size:
-                msg += f"\n{_fmt(orig_size)} → {_fmt(new_size)}"
-            messagebox.showinfo("압축 저장 완료", msg)
+            size_info = f"  ({_fmt(orig_size)} → {_fmt(new_size)})" if orig_size else ""
+            self._show_toast(f"🗜 {out_path.name} 저장 완료{size_info}",
+                             color=C['yellow'])
         except Exception as e:
             messagebox.showerror("저장 오류", f"압축 저장 실패\n{e}")
 
@@ -1833,10 +1874,11 @@ class ReceiptApp:
         if self.mode == 'manual':
             self.mode = 'view'
             self.mode_lbl.configure(text="")
+            self.canvas.config(cursor='arrow')
         else:
             self.mode = 'manual'
-            self.mode_lbl.configure(
-                text="[수동] 꼭짓점 드래그로 조정  ·  4개 미만이면 빈 곳 클릭으로 추가")
+            self.mode_lbl.configure(text="✏️ 수동 조정  —  꼭짓점 드래그 / 빈 곳 클릭으로 추가")
+            self.canvas.config(cursor='crosshair')
 
     # ──────────────────────────────────────────
     # 원근 변환 적용
@@ -2136,7 +2178,7 @@ class ReceiptApp:
             msg = f"{saved}개 저장 완료\n\n실패 목록:\n" + "\n".join(errors)
             messagebox.showwarning("일부 저장 실패", msg)
         else:
-            messagebox.showinfo("저장 완료", f"{saved}개 파일을 저장했습니다.")
+            self._show_toast(f"✅ {saved}개 파일 저장 완료", color=C['green'])
 
     # ──────────────────────────────────────────
     # 파일 크기 계산 (순차 백그라운드)
@@ -2198,13 +2240,13 @@ class ReceiptApp:
     def _compress_next_item(self):
         if not self._compress_queue:
             self.compress_btn.configure(state=tk.NORMAL, text="🗜  선택 항목 압축 저장")
-            msg = f"{self._compress_total - len(self._compress_errors)}개 압축 완료"
+            n_ok = self._compress_total - len(self._compress_errors)
             if self._compress_errors:
-                msg += "\n\n실패:\n" + "\n".join(self._compress_errors)
+                msg = f"{n_ok}개 압축 완료\n\n실패:\n" + "\n".join(self._compress_errors)
                 messagebox.showwarning("압축 완료 (일부 실패)", msg)
             else:
-                messagebox.showinfo("압축 완료", msg +
-                                    "\n파일명 앞에 'resize_' 가 붙어 원본 폴더에 저장됐습니다.")
+                self._show_toast(f"🗜 {n_ok}개 압축 완료  (resize_ 접두어로 저장)",
+                                 color=C['yellow'])
             return
         idx = self._compress_queue.pop(0)
         threading.Thread(target=self._compress_worker, args=(idx,), daemon=True).start()
@@ -2315,6 +2357,7 @@ class ReceiptApp:
         self.ocr_status_var.set(f"OCR 완료  ({len(text)}자 인식, {engine})")
         self.ocr_text.delete('1.0', tk.END)
         self.ocr_text.insert(tk.END, text)
+        self.ocr_engine_lbl.configure(text=f"OCR 엔진: {engine}  ✓", fg=C['green'])
 
         self._loading = True
         if date:   self.date_var.set(date)
@@ -2325,11 +2368,21 @@ class ReceiptApp:
     def _paddle_init_bg(self):
         self._init_paddle()
         if self._paddle_ready:
-            self.root.after(0, lambda: self.ocr_status_var.set("PaddleOCR 준비 완료"))
+            self.root.after(0, lambda: (
+                self.ocr_status_var.set("PaddleOCR 준비 완료"),
+                self.ocr_engine_lbl.configure(
+                    text="OCR 엔진: PaddleOCR  ✓", fg=C['green'])
+            ))
         else:
             err = self._paddle_error or "알 수 없는 오류"
-            self.root.after(0, lambda: self.ocr_status_var.set(
-                f"PaddleOCR 초기화 실패 → Tesseract 사용\n오류: {err[:80]}"))
+            fallback = "Tesseract" if (HAS_TESSERACT and hasattr(self, '_tess_cmd') and self._tess_cmd) \
+                       else "Windows OCR"
+            self.root.after(0, lambda: (
+                self.ocr_status_var.set(
+                    f"PaddleOCR 초기화 실패 → {fallback} 사용\n오류: {err[:80]}"),
+                self.ocr_engine_lbl.configure(
+                    text=f"OCR 엔진: {fallback}", fg=C['yellow'])
+            ))
 
     # ── PaddleOCR 초기화 ─────────────────────────
     def _init_paddle(self):
@@ -2687,10 +2740,8 @@ class ReceiptApp:
             self._update_list_row(self.queue_idx)
 
         remaining = len(self.file_queue) - self.queue_idx - 1
-        msg = f"저장 완료!\n\n파일명: {out_path.name}"
-        if remaining > 0:
-            msg += f"\n\n남은 파일: {remaining}장 → 자동으로 다음 파일을 불러옵니다."
-        messagebox.showinfo("저장 완료", msg)
+        suffix = f"  ({remaining}장 남음)" if remaining > 0 else ""
+        self._show_toast(f"✅ {out_path.name} 저장 완료{suffix}", color=C['green'])
 
         if remaining > 0:
             self._next_file()
