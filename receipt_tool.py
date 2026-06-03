@@ -129,7 +129,7 @@ class ReceiptApp:
     # ── 루트 ──────────────────────────────────
     def _build_root(self):
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-        self.root.title("영수증 보정 프로그램")
+        self.root.title("영수증 스캔 도우미")
         self.root.configure(bg=C['bg'])
 
         # ttk 다크 테마 (Treeview 포함)
@@ -163,6 +163,21 @@ class ReceiptApp:
             foreground=[('selected', '#1e1e2e'), ('active', C['text'])])
         style.configure('Horizontal.TScale',
             background=C['panel'], troughcolor=C['surface'], borderwidth=0)
+        style.configure('Vertical.TScrollbar',
+            background=C['button'], troughcolor=C['surface'],
+            borderwidth=0, arrowcolor=C['subtext'])
+        style.map('Vertical.TScrollbar',
+            background=[('active', '#7f849c'), ('disabled', C['surface'])])
+        style.configure('TCombobox',
+            fieldbackground=C['surface'], background=C['button'],
+            foreground=C['text'], selectbackground=C['accent'],
+            selectforeground='#1e1e2e', arrowcolor=C['subtext'], borderwidth=0)
+        style.map('TCombobox',
+            fieldbackground=[('readonly', C['surface'])],
+            foreground=[('readonly', C['text'])],
+            selectbackground=[('readonly', C['accent'])])
+        style.configure('Accent.Horizontal.TProgressbar',
+            background=C['accent'], troughcolor=C['surface'], borderwidth=0)
 
         win_w, win_h = 1380, 860
         self.root.geometry(f"{win_w}x{win_h}")
@@ -211,6 +226,10 @@ class ReceiptApp:
                                  font=('맑은 고딕', 9))
         self.mode_lbl.pack(side=tk.LEFT)
 
+        self.file_lbl = tk.Label(hdr, text="", bg=C['panel'], fg=C['dim'],
+                                 font=('맑은 고딕', 9))
+        self.file_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
         # 구역 감지 강도 슬라이더 (0=자동 스윕, 1~255=수동 역치)
         thr_box = tk.Frame(hdr, bg=C['panel'])
         thr_box.pack(side=tk.RIGHT)
@@ -232,7 +251,7 @@ class ReceiptApp:
         cf.columnconfigure(0, weight=1)
 
         self.canvas = tk.Canvas(cf, bg=C['canvas_bg'], highlightthickness=0,
-                                cursor='crosshair')
+                                cursor='arrow')
         self.canvas.grid(row=0, column=0, sticky='nsew')
         self.canvas.create_text(400, 300,
             text="이미지를 드래그 앤 드롭하거나\n아래 [파일 열기] 버튼을 클릭하세요",
@@ -341,11 +360,11 @@ class ReceiptApp:
         self.receipt_tree.heading('file',   text='파일명')
         self.receipt_tree.heading('date',   text='결제일자')
         self.receipt_tree.heading('amount', text='합계금액')
-        self.receipt_tree.heading('size',   text='크기 (현재→압축후)')
-        self.receipt_tree.column('file',   width=85,  minwidth=55, stretch=True)
-        self.receipt_tree.column('date',   width=72,  minwidth=65, stretch=False, anchor='center')
-        self.receipt_tree.column('amount', width=65,  minwidth=55, stretch=False, anchor='e')
-        self.receipt_tree.column('size',   width=130, minwidth=100, stretch=False, anchor='center')
+        self.receipt_tree.heading('size',   text='파일 크기')
+        self.receipt_tree.column('file',   width=100, minwidth=60, stretch=True)
+        self.receipt_tree.column('date',   width=74,  minwidth=65, stretch=False, anchor='center')
+        self.receipt_tree.column('amount', width=68,  minwidth=55, stretch=False, anchor='e')
+        self.receipt_tree.column('size',   width=115, minwidth=90, stretch=False, anchor='center')
 
         # 인식 상태별 색상
         self.receipt_tree.tag_configure('done',    foreground=C['green'])   # 날짜+금액 모두
@@ -362,11 +381,11 @@ class ReceiptApp:
 
         # 선택 항목 OCR 실행 버튼
         self.batch_ocr_btn = tk.Button(
-            lp, text="선택 항목 OCR 실행",
+            lp, text="🔍  선택 항목 OCR",
             command=self._run_ocr_batch,
-            bg=C['accent'], fg='#1e1e2e', relief=tk.FLAT,
+            bg='#7287fd', fg='white', relief=tk.FLAT,
             padx=10, pady=7, font=('맑은 고딕', 10, 'bold'),
-            activebackground=C['button'], activeforeground=C['text'],
+            activebackground='#8294ff', activeforeground='white',
             cursor='hand2', bd=0,
         )
         self.batch_ocr_btn.grid(row=4, column=0, columnspan=2,
@@ -378,7 +397,7 @@ class ReceiptApp:
             command=self._save_selected,
             bg='#40a02b', fg='white', relief=tk.FLAT,
             padx=10, pady=7, font=('맑은 고딕', 10, 'bold'),
-            activebackground=C['green'], activeforeground='#1e1e2e',
+            activebackground='#52b83f', activeforeground='white',
             cursor='hand2', bd=0,
         )
         self.batch_save_btn.grid(row=5, column=0, columnspan=2,
@@ -388,14 +407,24 @@ class ReceiptApp:
         self.compress_btn = tk.Button(
             lp, text="🗜  선택 항목 압축 저장",
             command=self._compress_selected,
-            bg=C['button'], fg=C['text'], relief=tk.FLAT,
+            bg=C['surface'], fg=C['text'], relief=tk.FLAT,
             padx=10, pady=7, font=('맑은 고딕', 10, 'bold'),
-            activebackground=C['surface'], activeforeground=C['text'],
+            activebackground=C['button'], activeforeground=C['text'],
             cursor='hand2', bd=0,
         )
         self.compress_btn.grid(row=6, column=0, columnspan=2,
-                               sticky='ew', padx=8, pady=(2, 8))
+                               sticky='ew', padx=8, pady=(2, 4))
         lp.rowconfigure(6, weight=0)
+
+        # OCR 엔진 상태 표시
+        self.ocr_engine_lbl = tk.Label(
+            lp, text="OCR 엔진 확인 중…",
+            bg=C['panel'], fg=C['dim'], font=('맑은 고딕', 8),
+            anchor='w', padx=10,
+        )
+        self.ocr_engine_lbl.grid(row=7, column=0, columnspan=2,
+                                 sticky='ew', pady=(0, 8))
+        lp.rowconfigure(7, weight=0)
 
         self.receipt_tree.bind('<<TreeviewSelect>>', self._on_list_select)
         self.receipt_tree.bind('<Double-Button-1>',  self._on_tree_double_click)
@@ -504,9 +533,15 @@ class ReceiptApp:
         rp.rowconfigure(2, weight=1)
         rp.columnconfigure(0, weight=1)
 
-        tk.Label(rp, text="분할 영역", bg=C['panel'], fg=C['text'],
-                 font=('맑은 고딕', 11, 'bold')
-                 ).grid(row=0, column=0, sticky='w', padx=12, pady=(10, 2))
+        rp_hdr = tk.Frame(rp, bg=C['panel'])
+        rp_hdr.grid(row=0, column=0, sticky='ew', padx=12, pady=(10, 2))
+        rp_hdr.columnconfigure(0, weight=1)
+        tk.Label(rp_hdr, text="분할 영역", bg=C['panel'], fg=C['text'],
+                 font=('맑은 고딕', 11, 'bold')).pack(side=tk.LEFT)
+        self.sp_count_lbl = tk.Label(rp_hdr, text="",
+                                     bg=C['panel'], fg=C['dim'],
+                                     font=('맑은 고딕', 8))
+        self.sp_count_lbl.pack(side=tk.RIGHT)
         tk.Label(rp, text="클릭하여 선택/해제",
                  bg=C['panel'], fg=C['dim'], font=('맑은 고딕', 8)
                  ).grid(row=1, column=0, sticky='w', padx=12)
