@@ -236,6 +236,12 @@ class ReceiptApp:
                                  font=('맑은 고딕', 9))
         self.file_lbl.pack(side=tk.LEFT, padx=(8, 0))
 
+        # 캔버스 포커스 힌트 (포커스 있을 때만 표시)
+        self.canvas_focus_lbl = tk.Label(
+            hdr, text="", bg=C['panel'], fg=C['accent'],
+            font=('맑은 고딕', 8, 'bold'))
+        self.canvas_focus_lbl.pack(side=tk.LEFT, padx=(10, 0))
+
         # 구역 감지 강도 슬라이더 (0=자동 스윕, 1~255=수동 역치)
         thr_box = tk.Frame(hdr, bg=C['panel'])
         thr_box.pack(side=tk.RIGHT)
@@ -256,7 +262,11 @@ class ReceiptApp:
         cf.rowconfigure(0, weight=1)
         cf.columnconfigure(0, weight=1)
 
-        self.canvas = tk.Canvas(cf, bg=C['canvas_bg'], highlightthickness=0,
+        self.canvas = tk.Canvas(cf, bg=C['canvas_bg'],
+                                highlightthickness=3,
+                                highlightbackground=C['canvas_bg'],
+                                highlightcolor=C['accent'],
+                                takefocus=True,
                                 cursor='arrow')
         self.canvas.grid(row=0, column=0, sticky='nsew')
         self.canvas.create_text(400, 300,
@@ -455,6 +465,14 @@ class ReceiptApp:
         self.root.bind('<F5>',        lambda _: self._auto_correct())
         self.root.bind('<Control-s>', lambda _: self._save())
         self.root.bind('<Control-S>', lambda _: self._save())
+
+        # 캔버스 Ctrl+C 복사 + 포커스 시각화
+        self.canvas.bind('<Control-c>', lambda _: self._copy_image_to_clipboard())
+        self.canvas.bind('<Control-C>', lambda _: self._copy_image_to_clipboard())
+        self.canvas.bind('<FocusIn>',  lambda _: self.canvas_focus_lbl.configure(
+            text="📋 Ctrl+C  복사"))
+        self.canvas.bind('<FocusOut>', lambda _: self.canvas_focus_lbl.configure(
+            text=""))
 
         if HAS_DND:
             for w in (self.canvas, self.root):
@@ -1957,6 +1975,7 @@ class ReceiptApp:
 
     # ── 마우스 ────────────────────────────────
     def _on_click(self, event):
+        self.canvas.focus_set()  # 클릭 시 포커스 → 테두리 활성화 + Ctrl+C 가능
         if self.orig_img is None:
             return
 
