@@ -642,13 +642,40 @@ class ReceiptApp:
 
     def _sp_paste_image(self, event=None):
         try:
-            from PIL import ImageGrab
-            pil_img = ImageGrab.grabclipboard()
-            if pil_img is None:
-                messagebox.showinfo("알림", "클립보드에 이미지가 없습니다.")
+            from PIL import ImageGrab, Image
+            data = ImageGrab.grabclipboard()
+
+            if data is None:
+                messagebox.showinfo("알림",
+                    "클립보드에 이미지가 없습니다.\n"
+                    "스크린샷을 캡처하거나 이미지를 복사한 뒤 다시 시도하세요.")
                 return
-            arr = np.array(pil_img.convert('RGB'))
+
+            # 탐색기에서 파일을 복사하면 경로 목록으로 반환됨
+            if isinstance(data, list):
+                img_exts = {'.jpg', '.jpeg', '.png', '.bmp',
+                            '.tiff', '.tif', '.webp'}
+                for p in data:
+                    if Path(str(p)).suffix.lower() in img_exts:
+                        raw = np.fromfile(str(p), dtype=np.uint8)
+                        img = cv2.imdecode(raw, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            self._sp_set_image(img, str(p))
+                            return
+                messagebox.showinfo("알림",
+                    "클립보드의 파일 중 이미지를 찾을 수 없습니다.")
+                return
+
+            # PIL Image 객체가 아니면 지원 불가
+            if not isinstance(data, Image.Image):
+                messagebox.showinfo("알림",
+                    "클립보드에 이미지가 없습니다.\n"
+                    "스크린샷을 캡처하거나 이미지를 복사한 뒤 다시 시도하세요.")
+                return
+
+            arr = np.array(data.convert('RGB'))
             self._sp_set_image(cv2.cvtColor(arr, cv2.COLOR_RGB2BGR), None)
+
         except Exception as e:
             messagebox.showerror("오류", f"붙여넣기 실패\n{e}")
 
