@@ -274,26 +274,26 @@ class ReceiptApp:
                              activebackground=C['button'], activeforeground=C['text'],
                              cursor='hand2', bd=0)
 
-        # 이전/다음 — 다른 버튼과 같은 2줄 스타일
-        self.next_btn = btn(bf, "다음\n▶", self._next_file)
-        self.next_btn.pack(side=tk.RIGHT, padx=2)
+        # 이전/다음 — 화살표 위, 텍스트 아래, 세로 중앙 정렬
+        self.next_btn = btn(bf, "▶\n다음", self._next_file)
+        self.next_btn.pack(side=tk.RIGHT, padx=2, anchor='center')
         self.prev_btn = btn(bf, "◀\n이전", self._prev_file)
-        self.prev_btn.pack(side=tk.RIGHT, padx=2)
+        self.prev_btn.pack(side=tk.RIGHT, padx=2, anchor='center')
         tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.RIGHT)
 
         # 보정 관련 버튼
-        btn(bf, "✨\n자동 보정",   self._auto_correct).pack(side=tk.LEFT, padx=2)
-        btn(bf, "✏️\n수동 조정",   self._toggle_manual).pack(side=tk.LEFT, padx=2)
+        btn(bf, "✨\n자동 보정",   self._auto_correct).pack(side=tk.LEFT, padx=2, anchor='center')
+        btn(bf, "✏️\n수동 조정",   self._toggle_manual).pack(side=tk.LEFT, padx=2, anchor='center')
         btn(bf, "🔍\nOCR",         self._run_ocr,
-            C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+            C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2, anchor='center')
         btn(bf, "💾\n원본 대체",   self._replace_with_warped,
-            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
+            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2, anchor='center')
         btn(bf, "📋\n복사",        self._copy_image_to_clipboard,
-            C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2)
-        btn(bf, "🗜\n압축 저장",   self._compress_current).pack(side=tk.LEFT, padx=2)
+            C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2, anchor='center')
+        btn(bf, "🗜\n압축 저장",   self._compress_current).pack(side=tk.LEFT, padx=2, anchor='center')
         tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.LEFT)
         btn(bf, "✅\n최종 저장",   self._save,
-            '#40a02b', 'white', bold=True).pack(side=tk.LEFT, padx=2)
+            '#40a02b', 'white', bold=True).pack(side=tk.LEFT, padx=2, anchor='center')
 
         # ─ 히든 프레임: 코드 참조용 위젯 (화면에 표시 안 함) ─
         _hf = tk.Frame(self.root)  # 배치하지 않음
