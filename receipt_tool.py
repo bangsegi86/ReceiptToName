@@ -275,35 +275,41 @@ class ReceiptApp:
 
         bf = tk.Frame(left, bg=C['panel'])
         bf.grid(row=2, column=0, sticky='ew', padx=10, pady=(4, 10))
+        bf.columnconfigure(0, weight=1)   # 왼쪽 확장
+        bf.columnconfigure(1, weight=0)   # 가운데 고정
+        bf.columnconfigure(2, weight=1)   # 오른쪽 확장
 
         def btn(parent, text, cmd, bg=C['surface'], fg=C['text'], bold=False):
             f = ('맑은 고딕', 9, 'bold') if bold else ('맑은 고딕', 9)
             return tk.Button(parent, text=text, command=cmd,
                              bg=bg, fg=fg, relief=tk.FLAT,
-                             padx=8, pady=5, font=f, justify=tk.CENTER,
+                             padx=10, pady=6, font=f, justify=tk.CENTER,
+                             width=5,
                              activebackground=C['button'], activeforeground=C['text'],
                              cursor='hand2', bd=0)
 
-        # 이전/다음 — 화살표 위, 텍스트 아래, 세로 중앙 정렬
-        self.next_btn = btn(bf, "▶\n다음", self._next_file)
-        self.next_btn.pack(side=tk.RIGHT, padx=2, anchor='center')
-        self.prev_btn = btn(bf, "◀\n이전", self._prev_file)
-        self.prev_btn.pack(side=tk.RIGHT, padx=2, anchor='center')
-        tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.RIGHT)
+        # ── 왼쪽: OCR, 원본 대체 ──
+        bf_left = tk.Frame(bf, bg=C['panel'])
+        bf_left.grid(row=0, column=0, sticky='w', padx=(0, 4))
+        btn(bf_left, "🔍\nOCR",         self._run_ocr,
+            C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=3)
+        btn(bf_left, "💾\n원본 대체",   self._replace_with_warped,
+            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=3)
 
-        # 보정 관련 버튼
-        btn(bf, "✨\n자동 보정",   self._auto_correct).pack(side=tk.LEFT, padx=2, anchor='center')
-        btn(bf, "✏️\n수동 조정",   self._toggle_manual).pack(side=tk.LEFT, padx=2, anchor='center')
-        btn(bf, "🔍\nOCR",         self._run_ocr,
-            C['accent'], '#1e1e2e').pack(side=tk.LEFT, padx=2, anchor='center')
-        btn(bf, "💾\n원본 대체",   self._replace_with_warped,
-            C['yellow'], '#1e1e2e').pack(side=tk.LEFT, padx=2, anchor='center')
-        btn(bf, "📋\n복사",        self._copy_image_to_clipboard,
-            C['green'], '#1e1e2e').pack(side=tk.LEFT, padx=2, anchor='center')
-        btn(bf, "🗜\n압축 저장",   self._compress_current).pack(side=tk.LEFT, padx=2, anchor='center')
-        tk.Frame(bf, bg=C['panel'], width=8).pack(side=tk.LEFT)
-        btn(bf, "✅\n최종 저장",   self._save,
-            '#40a02b', 'white', bold=True).pack(side=tk.LEFT, padx=2, anchor='center')
+        # ── 가운데: 이전, 다음 ──
+        bf_mid = tk.Frame(bf, bg=C['panel'])
+        bf_mid.grid(row=0, column=1)
+        self.prev_btn = btn(bf_mid, "◀\n이전", self._prev_file)
+        self.prev_btn.pack(side=tk.LEFT, padx=3)
+        self.next_btn = btn(bf_mid, "▶\n다음", self._next_file)
+        self.next_btn.pack(side=tk.LEFT, padx=3)
+
+        # ── 오른쪽: 압축 저장, 최종 저장 ──
+        bf_right = tk.Frame(bf, bg=C['panel'])
+        bf_right.grid(row=0, column=2, sticky='e', padx=(4, 0))
+        btn(bf_right, "🗜\n압축 저장",  self._compress_current).pack(side=tk.LEFT, padx=3)
+        btn(bf_right, "✅\n최종 저장",  self._save,
+            '#40a02b', 'white', bold=True).pack(side=tk.LEFT, padx=3)
 
         # ─ 히든 프레임: 코드 참조용 위젯 (화면에 표시 안 함) ─
         _hf = tk.Frame(self.root)  # 배치하지 않음
